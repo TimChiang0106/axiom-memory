@@ -64,6 +64,8 @@ async def get_store() -> MemoryStore:
                     event_retention_days=settings.event_retention_days,
                     embedder=embedder,
                     semantic_floor=settings.semantic_floor,
+                    write_neighbor_threshold=settings.write_neighbor_threshold,
+                    write_neighbor_count=settings.write_neighbor_count,
                 )
     return _store
 
@@ -103,7 +105,10 @@ mcp = FastMCP(
         "curated memory yet. Each ongoing project keeps one `<project>-overview` "
         "memory (status with a date, decisions in force, abandoned approaches, open "
         "items, key detail memories in `related`): `get` it first when asked where a "
-        "project stands, and update it after a substantial session on that project."
+        "project stands, and update it after a substantial session on that project. "
+        "Give context-bound memories (a job's templates, a project's specifics) the "
+        "overview's name prefix and link them from it, so forgetting the overview "
+        "retires them as a group; keep portable know-how in `topics` without the prefix."
     ),
     auth=build_auth(get_settings()),
 )
@@ -195,6 +200,12 @@ async def remember(
     memory looks similar to existing ones, this returns duplicate_suspected
     with the matches instead of saving — update the existing memory by reusing
     its name, or retry with allow_duplicate=True if it is genuinely new.
+
+    On a successful create the result also carries `neighbors`: the nearest
+    existing memories that were below the duplicate bar. These are not
+    duplicates, but check them — if the new fact revises or contradicts one
+    (e.g. a project overview or plan it supersedes), update that memory by its
+    name instead of leaving two records that disagree.
     """
     store = await get_store()
     return await store.remember(
@@ -249,9 +260,11 @@ async def recall(
 
     Call this before answering anything that could depend on the user's
     preferences, projects, or past decisions. A result with possibly_stale=true
-    is a `state` memory that has not been updated in a while — verify it with
-    the user before relying on it, and re-`remember` it under the same name
-    once confirmed so it stops being flagged. A result with
+    is either a `state` memory that has not been updated in a while, or a
+    memory (typically a project overview) whose linked details were updated
+    more recently than it was — so it may be behind. Verify it with the user
+    before relying on it, and re-`remember` it under the same name once
+    confirmed so it stops being flagged. A result with
     provenance='inferred' is an AI's conclusion, not something the user
     said — treat it as a hypothesis and confirm it before acting on it or
     presenting it as fact. A result with truncated=true
@@ -325,10 +338,19 @@ async def forget(
 ) -> dict:
     """Delete one memory by name. Use when the user asks to forget something
     or a memory is confirmed obsolete. Its final state stays in `history`,
-    so a mistaken forget can be undone."""
+    so a mistaken forget can be undone.
+
+    Forgetting a `<project>-overview` retires that project (or job): the
+    result's `left_behind` lists the memories that belonged to it and still
+    surface in recall. Walk them with the user — forget the ones tied to that
+    context, and re-home anything worth keeping (e.g. a general method as a
+    `topics` memory without the project prefix)."""
     store = await get_store()
     deleted = await store.forget(name)
-    return {"deleted": deleted, "name": name}
+    result: dict = {"deleted": deleted, "name": name}
+    if deleted and name.endswith("-overview"):
+        result["left_behind"] = [m.name for m in await store.left_behind(name)]
+    return result
 
 
 @mcp.tool
@@ -351,8 +373,11 @@ async def history(
 async def review() -> ReviewReport:
     """Report consolidation candidates across the whole store: near-duplicate
     pairs worth merging, stale `state` memories to re-verify, never-recalled
-    memories that may not be worth keeping, and recurring event clusters that
-    may deserve promotion to a real memory.
+    memories that may not be worth keeping, project overviews that have fallen
+    behind their own detail memories (refresh them), project notes orphaned
+    from their overview (fold them in), memories left behind by a forgotten
+    overview (retire or re-home them), and recurring event clusters that may
+    deserve promotion to a real memory.
 
     Use this to run a reflection session: walk the report with the user,
     merge or refresh via `remember`, and confirm before any `forget`. When

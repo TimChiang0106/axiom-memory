@@ -28,7 +28,8 @@ mirror.
 - **Typed and categorised** — each memory has a lifecycle `type` (preference,
   fact, project, state, reference, procedural) that sets how fast it decays,
   and a thematic `category` (you, people, areas, topics) to filter by. Stale
-  `state` memories come back flagged so the model re-checks them.
+  `state` memories — and overviews a linked detail has moved on past — come
+  back flagged so the model re-checks them.
 - **Version history** — every content change and every `forget` snapshots the
   previous version, so a bad overwrite by any client is recoverable through
   `history`.
@@ -38,11 +39,19 @@ mirror.
 - **Overviews** — by convention (see the client instructions), each ongoing
   project keeps one `<project>-overview` memory and you keep one
   `user-profile`, so "where does X stand" and "who am I talking to" are one
-  read instead of a pile of fragments.
+  read instead of a pile of fragments. The overview is held to its job: it is
+  flagged when a linked detail outdates it, and `review` reports stray project
+  notes that never got folded in. Forgetting an overview retires its project:
+  whatever it left behind is listed right away and stays in `review` until
+  forgotten or re-homed.
+- **Write with context** — a new memory comes back with its nearest existing
+  neighbours (below the duplicate bar), so the writer can revise the plan or
+  overview it supersedes instead of leaving two records that quietly disagree.
 - **Episodic layer** — `log_event` captures cheap one-line ambient signals that
   never enter recall; `review` clusters recent events and surfaces recurring
   patterns as candidates for promotion to a real memory, alongside
-  near-duplicates, stale state, and barely-used memories.
+  near-duplicates, stale state, barely-used memories, drifted overviews, and
+  orphaned project notes.
 - **Measurable** — `axiom eval` scores recall (hit@k, MRR) against your own
   labelled queries, so ranking changes are tested instead of guessed.
 - **Graceful degradation** — no Gemini key, or the embedding API is slow?

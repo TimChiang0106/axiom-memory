@@ -121,7 +121,7 @@ async def test_semantic_signal_breaks_saturated_lexical_ties(pool: asyncpg.Pool)
     await store.remember(
         name="pipeline-log",
         description="Client pipeline status",
-        content="Quote sent to Dana; FortiGate plan; DLP rounds; SOW drafts.",
+        content="Quote sent to Dana; gateway plan; DLP rounds; SOW drafts.",
         type="project",
         source_app="test",
         allow_duplicate=True,

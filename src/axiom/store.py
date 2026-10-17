@@ -11,6 +11,7 @@ import asyncpg
 from axiom.embeddings import GeminiEmbedder, to_pgvector
 from axiom.models import (
     Category,
+    DriftedOverview,
     DuplicatePair,
     Event,
     EventCluster,
@@ -23,6 +24,38 @@ from axiom.models import (
     ReviewReport,
     StaleMemory,
 )
+
+# Project overviews follow this name suffix by convention (see the server
+# instructions); staleness and orphan checks key off it.
+_OVERVIEW_SUFFIX = "-overview"
+
+# Memories left behind by a forgotten overview: they share its name prefix or
+# were linked from its final version, and no live overview links them now.
+# Retiring a context (a finished project, a job you left) means forgetting its
+# overview; without this, its details would quietly keep surfacing in recall as
+# if still in force. $2 narrows to one overview, or NULL for all of them.
+_HEADLESS_SQL = """
+    WITH gone AS (
+        SELECT DISTINCT ON (v.name)
+               v.name,
+               left(v.name, length(v.name) - length($1)) AS prefix,
+               v.related
+        FROM memory_versions v
+        WHERE v.reason = 'forgotten'
+          AND v.name LIKE '%' || $1
+          AND ($2::text IS NULL OR v.name = $2)
+          AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.name = v.name)
+        ORDER BY v.name, v.superseded_at DESC, v.id DESC
+    )
+    SELECT DISTINCT m.name, m.description, m.type, m.category, m.updated_at
+    FROM memories m
+    JOIN gone g ON m.name LIKE g.prefix || '-%' OR m.name = ANY(g.related)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM memories o
+        WHERE o.name LIKE '%' || $1 AND m.name = ANY(o.related)
+    )
+    ORDER BY m.updated_at DESC
+"""
 
 # Text the search indexes are built over; must match the migration definitions.
 _SEARCH_TEXT = "m.name || ' ' || m.description || ' ' || m.content"
@@ -53,9 +86,13 @@ class MemoryStore:
         embedder: GeminiEmbedder | None = None,
         semantic_floor: float = 0.55,
         semantic_dedup_threshold: float | None = None,
+        write_neighbor_threshold: float = 0.15,
+        write_neighbor_count: int = 3,
     ):
         self._pool = pool
         self._dedup_threshold = dedup_threshold
+        self._write_neighbor_threshold = write_neighbor_threshold
+        self._write_neighbor_count = write_neighbor_count
         # Cosine similarity at which two memories count as saying the same
         # thing; None disables the embedding screen (see config for why).
         self._semantic_dedup_threshold = semantic_dedup_threshold
@@ -124,14 +161,21 @@ class MemoryStore:
             if updated is not None:
                 return RememberResult(status="updated", memory=Memory.from_row(updated))
 
+            search_text = f"{name} {description} {content}"
             if not allow_duplicate:
                 similar = await self._find_similar(
                     conn,
-                    f"{name} {description} {content}",
+                    search_text,
                     embedding if self._semantic_dedup_threshold is not None else None,
                 )
                 if similar:
                     return RememberResult(status="duplicate_suspected", similar=similar)
+
+            # Advisory siblings — computed before the insert so the new name is
+            # naturally excluded. The embedding is used even when the dedup
+            # screen is off: project siblings score high semantically, which is
+            # exactly what we want to surface here.
+            neighbors = await self._neighbors(conn, search_text, embedding, exclude=name)
 
             created = await conn.fetchrow(
                 f"""
@@ -152,7 +196,9 @@ class MemoryStore:
                 provenance or "stated",
             )
             assert created is not None
-            return RememberResult(status="created", memory=Memory.from_row(created))
+            return RememberResult(
+                status="created", memory=Memory.from_row(created), neighbors=neighbors
+            )
 
     async def _embed_memory(self, name: str, description: str, content: str) -> str | None:
         """Embed the same text the lexical indexes cover. None (no embedder
@@ -243,8 +289,12 @@ class MemoryStore:
                            ELSE 1 END
                     * CASE WHEN sub.provenance = 'inferred' THEN $10::float8 ELSE 1 END
                    )::float8 AS score,
-                   (sub.type = 'state'
-                    AND sub.updated_at < now() - make_interval(days => $8::int)
+                   ((sub.type = 'state'
+                     AND sub.updated_at < now() - make_interval(days => $8::int))
+                    OR EXISTS (
+                        SELECT 1 FROM memories r
+                        WHERE r.name = ANY(sub.related) AND r.updated_at > sub.updated_at
+                    )
                    ) AS possibly_stale
             FROM (
                 SELECT {_COLUMNS},
@@ -284,8 +334,23 @@ class MemoryStore:
         return memories
 
     async def get(self, name: str) -> Memory | None:
+        """Fetch one memory by exact name. possibly_stale is computed the same
+        way recall does it, so reading a project overview directly still flags
+        that one of its details has moved on past it."""
         row = await self._pool.fetchrow(
-            f"SELECT {_COLUMNS} FROM memories m WHERE m.name = $1", name
+            f"""
+            SELECT {_COLUMNS},
+                   ((m.type = 'state'
+                     AND m.updated_at < now() - make_interval(days => $2::int))
+                    OR EXISTS (
+                        SELECT 1 FROM memories r
+                        WHERE r.name = ANY(m.related) AND r.updated_at > m.updated_at
+                    )
+                   ) AS possibly_stale
+            FROM memories m WHERE m.name = $1
+            """,
+            name,
+            self._stale_state_days,
         )
         return Memory.from_row(row) if row else None
 
@@ -302,6 +367,12 @@ class MemoryStore:
                 name,
             )
             return True
+
+    async def left_behind(self, overview: str) -> list[MemorySummary]:
+        """Memories a forgotten overview left behind (see `_HEADLESS_SQL`) —
+        what still has to be retired, or re-homed, along with it."""
+        rows = await self._pool.fetch(_HEADLESS_SQL, _OVERVIEW_SUFFIX, overview)
+        return [MemorySummary(**dict(r)) for r in rows]
 
     async def list_all(self, *, category: Category | None = None) -> list[MemorySummary]:
         if category is not None:
@@ -490,9 +561,11 @@ class MemoryStore:
     ) -> ReviewReport:
         """Surface memories worth a human's attention — the minimal, offline
         version of sleep-time consolidation. It only reports; it never edits or
-        deletes. Four buckets: near-duplicate pairs (merge?), `state` memories
+        deletes. Six buckets: near-duplicate pairs (merge?), `state` memories
         left untouched too long (still true?), memories that have barely ever
-        surfaced in recall (worth keeping?), and recurring episodic events
+        surfaced in recall (worth keeping?), project overviews that have fallen
+        behind their own details (refresh the source of truth?), project notes
+        orphaned from their overview (fold in?), and recurring episodic events
         (promote to a memory?)."""
         # Lexical pairs catch same-wording duplicates; embedding pairs, when
         # the semantic screen is enabled, catch paraphrases and
@@ -546,14 +619,120 @@ class MemoryStore:
             zombie_days,
             zombie_max_use_count,
         )
+        # A project overview that its own linked details have overtaken: the
+        # single source of truth is behind what it points at (the gateway-rollout
+        # case — a verification result newer than the plan it should revise).
+        drift_rows = await self._pool.fetch(
+            """
+            SELECT o.name, o.updated_at,
+                   array_agg(r.name ORDER BY r.updated_at DESC) AS newer_related
+            FROM memories o
+            JOIN memories r ON r.name = ANY(o.related) AND r.updated_at > o.updated_at
+            WHERE o.name LIKE '%' || $1
+            GROUP BY o.name, o.updated_at
+            ORDER BY o.updated_at
+            """,
+            _OVERVIEW_SUFFIX,
+        )
+        # Notes that belong to a project with an overview — they share its name
+        # prefix — but aren't linked from it: the stray fifth memory the
+        # overview should have folded in. Scoped to prefixes that actually have
+        # an overview, so projects with no overview don't flood the bucket.
+        orphan_rows = await self._pool.fetch(
+            """
+            WITH overviews AS (
+                SELECT name,
+                       left(name, length(name) - length($1)) AS prefix,
+                       related
+                FROM memories
+                WHERE name LIKE '%' || $1
+            )
+            SELECT DISTINCT m.name, m.description, m.type, m.category, m.updated_at
+            FROM memories m
+            JOIN overviews o ON m.name LIKE o.prefix || '-%'
+            WHERE m.name NOT LIKE '%' || $1
+              AND NOT (m.name = ANY(o.related))
+            ORDER BY m.updated_at DESC
+            """,
+            _OVERVIEW_SUFFIX,
+        )
+        headless_rows = await self._pool.fetch(_HEADLESS_SQL, _OVERVIEW_SUFFIX, None)
         return ReviewReport(
             duplicates=[DuplicatePair(**dict(r)) for r in dup_rows],
             stale_state=[StaleMemory(**dict(r)) for r in stale_rows],
             zombies=[StaleMemory(**dict(r)) for r in zombie_rows],
+            drifted_overviews=[
+                DriftedOverview(
+                    name=r["name"],
+                    updated_at=r["updated_at"],
+                    newer_related=list(r["newer_related"]),
+                )
+                for r in drift_rows
+            ],
+            orphans=[
+                MemorySummary(
+                    name=r["name"],
+                    description=r["description"],
+                    type=r["type"],
+                    category=r["category"],
+                    updated_at=r["updated_at"],
+                )
+                for r in orphan_rows
+            ],
+            headless=[MemorySummary(**dict(r)) for r in headless_rows],
             recurring=await self.recurring_events(
                 window_days=event_window_days, min_count=event_min_count
             ),
         )
+
+    async def _neighbors(
+        self,
+        conn: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+        text: str,
+        embedding: str | None,
+        *,
+        exclude: str,
+    ) -> list[MemorySummary]:
+        """The existing memories most similar to one being written — advisory
+        context, not a gate. Unlike the dedup screen (`_find_similar`) this uses
+        a low bar and never blocks; it surfaces the few nearest so the writer
+        can rewrite a drifting overview or plan instead of adding a parallel.
+        Returns summaries, not bodies, to stay cheap on the caller's context —
+        the writer can `get` the one that looks relevant."""
+        # Symmetric trigram similarity (doc-vs-doc), same signal and scale as
+        # the dedup screen, just a lower bar — not word_similarity, which is for
+        # short-query-vs-doc and reads low when the first arg is a long memory.
+        sim = f"""
+            GREATEST(
+                similarity({_SEARCH_TEXT}, $1),
+                CASE WHEN $2::text IS NULL OR m.embedding IS NULL THEN 0
+                     ELSE 1 - (m.embedding <=> ($2::text)::vector)
+                END
+            )"""
+        rows = await conn.fetch(
+            f"""
+            SELECT m.name, m.description, m.type, m.category, m.updated_at
+            FROM memories m
+            WHERE m.name <> $3 AND ({sim})::float8 >= $4
+            ORDER BY ({sim})::float8 DESC, m.updated_at DESC
+            LIMIT $5
+            """,
+            text,
+            embedding,
+            exclude,
+            self._write_neighbor_threshold,
+            self._write_neighbor_count,
+        )
+        return [
+            MemorySummary(
+                name=r["name"],
+                description=r["description"],
+                type=r["type"],
+                category=r["category"],
+                updated_at=r["updated_at"],
+            )
+            for r in rows
+        ]
 
     async def _find_similar(
         self,

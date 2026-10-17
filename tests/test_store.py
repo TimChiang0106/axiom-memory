@@ -407,6 +407,147 @@ async def test_forget(store: MemoryStore):
     assert await store.get("to-be-deleted") is None
 
 
+async def test_remember_surfaces_neighbors_on_create(store: MemoryStore):
+    # A new project note that is similar to the existing plan, but not a
+    # duplicate, comes back with the plan as an advisory neighbour so the writer
+    # can revise it instead of leaving two records that disagree.
+    await store.remember(
+        name="gateway-plan",
+        description="Gateway rollout execution plan",
+        content="Gateway rollout execution plan: machine type n2-standard-8.",
+        type="project",
+        source_app="test",
+    )
+    result = await store.remember(
+        name="gateway-progress",
+        description="Gateway rollout progress so far",
+        content="Gateway rollout progress: the first node is serving traffic.",
+        type="project",
+        source_app="test",
+    )
+    assert result.status == "created"
+    assert "gateway-plan" in {n.name for n in result.neighbors}
+    # Neighbours are index summaries, not full bodies.
+    assert all(not hasattr(n, "content") for n in result.neighbors)
+
+
+async def test_overview_behind_its_details_is_flagged_stale(store: MemoryStore, pool):
+    # A project overview whose linked detail has moved on past it is flagged
+    # possibly_stale on both get and recall; the detail itself is not.
+    await store.remember(
+        name="widget-overview",
+        description="Widget project overview and status",
+        content="Widget project overview: status, decisions, open items.",
+        type="project",
+        source_app="test",
+        related=["widget-arch"],
+    )
+    await store.remember(
+        name="widget-arch",
+        description="Widget architecture decision",
+        content="Widget runs on a single-node Postgres.",
+        type="project",
+        source_app="test",
+        allow_duplicate=True,
+    )
+    # Pin the overview behind its detail deterministically.
+    await pool.execute(
+        "UPDATE memories SET updated_at = now() - interval '2 days' WHERE name = 'widget-overview'"
+    )
+
+    overview = await store.get("widget-overview")
+    detail = await store.get("widget-arch")
+    assert overview is not None and overview.possibly_stale
+    assert detail is not None and not detail.possibly_stale
+
+    recalled = {m.name: m for m in await store.recall("widget")}
+    assert recalled["widget-overview"].possibly_stale
+
+
+async def test_review_reports_drift_and_orphans(store: MemoryStore, pool):
+    await store.remember(
+        name="proj-overview",
+        description="Project overview and status",
+        content="Project overview: status, decisions in force, open items.",
+        type="project",
+        source_app="test",
+        related=["proj-arch"],
+    )
+    await store.remember(
+        name="proj-arch",
+        description="Project architecture decision",
+        content="Chosen architecture: event-sourced core.",
+        type="project",
+        source_app="test",
+        allow_duplicate=True,
+    )
+    await store.remember(
+        name="proj-notes",
+        description="Loose project progress note",
+        content="Deployed the staging environment yesterday.",
+        type="project",
+        source_app="test",
+        allow_duplicate=True,
+    )
+    # Overview predates its linked detail → drift; proj-notes shares the prefix
+    # but is not linked from the overview → orphan.
+    await pool.execute(
+        "UPDATE memories SET updated_at = now() - interval '2 days' WHERE name = 'proj-overview'"
+    )
+
+    report = await store.consolidation_candidates(stale_state_days=90, zombie_days=60)
+
+    drift = {d.name: d for d in report.drifted_overviews}
+    assert "proj-overview" in drift
+    assert "proj-arch" in drift["proj-overview"].newer_related
+
+    orphan_names = {o.name for o in report.orphans}
+    assert "proj-notes" in orphan_names
+    assert "proj-arch" not in orphan_names  # linked, so not orphaned
+    assert "proj-overview" not in orphan_names  # the overview itself never orphans
+
+
+async def test_forgotten_overview_leaves_its_members_headless(store: MemoryStore):
+    async def write(name: str, content: str, **kw) -> None:
+        await store.remember(
+            name=name,
+            description=content,
+            content=content,
+            type="procedural",
+            source_app="test",
+            allow_duplicate=True,
+            **kw,
+        )
+
+    await write("acme-wbs-format", "Acme WBS: three levels, numbered 1.1.1.")
+    await write("acme-sow-structure", "Acme SOW sections: scope, milestones, acceptance.")
+    await write("wbs-craft", "Define done for every work package before estimating.")
+    await write(
+        "acme-overview",
+        "Job at Acme: status, decisions in force, open items.",
+        related=["acme-wbs-format", "wbs-craft"],
+    )
+    # Still-live overviews keep their members out of the bucket.
+    report = await store.consolidation_candidates(stale_state_days=90, zombie_days=60)
+    assert report.headless == []
+
+    assert await store.forget("acme-overview") is True
+    left = {m.name for m in await store.left_behind("acme-overview")}
+    # Prefix members (linked or not) and linked non-prefix members are left behind.
+    assert left == {"acme-wbs-format", "acme-sow-structure", "wbs-craft"}
+
+    # Re-homing a memory under another live overview takes it out of the bucket.
+    await write("craft-overview", "Personal methodology overview.", related=["wbs-craft"])
+    report = await store.consolidation_candidates(stale_state_days=90, zombie_days=60)
+    assert {m.name for m in report.headless} == {"acme-wbs-format", "acme-sow-structure"}
+
+    # Retiring the leftovers empties it.
+    await store.forget("acme-wbs-format")
+    await store.forget("acme-sow-structure")
+    report = await store.consolidation_candidates(stale_state_days=90, zombie_days=60)
+    assert report.headless == []
+
+
 async def test_list_all(store: MemoryStore):
     await store.remember(
         name="a-memory",

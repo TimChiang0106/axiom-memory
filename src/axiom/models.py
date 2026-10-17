@@ -33,9 +33,12 @@ class Memory(BaseModel):
     # neighbours the caller may also want to pull.
     related: list[str] = []
     score: float | None = None
-    # Computed at recall time, never stored: a `state` memory whose updated_at
-    # is older than the stale threshold. The caller should verify the content
-    # before relying on it, and re-remember it to refresh.
+    # Computed at read time, never stored. True when either a `state` memory is
+    # older than the stale threshold, or a memory whose `related` links point at
+    # something updated more recently than itself — the classic case being a
+    # project overview left behind while one of its detail memories moved on.
+    # The caller should verify the content before relying on it, and
+    # re-remember it to refresh.
     possibly_stale: bool = False
 
     def payload(self, max_chars: int | None = None) -> dict:
@@ -85,6 +88,12 @@ class RememberResult(BaseModel):
     # new one collided with. The caller should update one of these by name, or
     # retry with allow_duplicate=True if it is genuinely new.
     similar: list[Memory] = []
+    # Populated on create: the existing memories most similar to the new one,
+    # below the duplicate bar but close enough to be worth a look. Advisory, not
+    # a block — surfaced so the writer notices a project's overview, plan, or
+    # earlier decision and rewrites it instead of silently adding a parallel
+    # memory that quietly contradicts it.
+    neighbors: list[MemorySummary] = []
 
 
 class MemoryVersion(BaseModel):
@@ -110,6 +119,16 @@ class DuplicatePair(BaseModel):
     name_a: str
     name_b: str
     similarity: float
+
+
+class DriftedOverview(BaseModel):
+    """A project overview whose linked detail memories were updated more
+    recently than the overview itself — the single source of truth may be
+    behind. `newer_related` lists the details that moved on, newest first."""
+
+    name: str
+    updated_at: datetime
+    newer_related: list[str]
 
 
 class StaleMemory(BaseModel):
@@ -153,5 +172,15 @@ class ReviewReport(BaseModel):
     duplicates: list[DuplicatePair] = []
     stale_state: list[StaleMemory] = []
     zombies: list[StaleMemory] = []
+    # Project overviews that have fallen behind their own detail memories.
+    drifted_overviews: list[DriftedOverview] = []
+    # Memories that belong to a project with an overview (they share its name
+    # prefix) but are not linked from it — stray notes the overview should
+    # fold in, the way a loose progress update slips past the source of truth.
+    orphans: list[MemorySummary] = []
+    # Memories whose overview was forgotten (they share its prefix or were
+    # linked from it) and that no live overview links: the leftovers of a
+    # retired project or job, still surfacing in recall — forget or re-home.
+    headless: list[MemorySummary] = []
     # Recurring episodic patterns; promotion candidates, not yet memories.
     recurring: list[EventCluster] = []

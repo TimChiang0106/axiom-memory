@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     # were flagged and nearly every project write would bounce.
     semantic_dedup_threshold: float | None = None
 
+    # On every create, remember returns the few existing memories most similar
+    # to the new one (below the duplicate bar) as advisory context, so the
+    # writer can spot a project's overview/plan/earlier decision and rewrite it
+    # rather than add a silent parallel. A low bar on purpose — it only
+    # surfaces, never blocks — so false neighbours cost nothing.
+    write_neighbor_threshold: float = 0.15
+    write_neighbor_count: int = 3
+
     # Minimum combined score (FTS rank or trigram word similarity) for a
     # memory to appear in recall results.
     recall_threshold: float = 0.1

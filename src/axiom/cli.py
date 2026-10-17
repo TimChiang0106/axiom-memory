@@ -72,13 +72,36 @@ async def _review(
         print(f"\nBarely used ({len(report.zombies)}) — worth keeping?:")
         for z in report.zombies:
             print(f"  {z.since:%Y-%m-%d}  {z.name}")
+    if report.drifted_overviews:
+        print(
+            f"\nOverviews behind their details ({len(report.drifted_overviews)}) "
+            "— refresh the source of truth?:"
+        )
+        for o in report.drifted_overviews:
+            print(f"  {o.updated_at:%Y-%m-%d}  {o.name}  <  {', '.join(o.newer_related)}")
+    if report.orphans:
+        print(f"\nOrphaned from an overview ({len(report.orphans)}) — fold in?:")
+        for m in report.orphans:
+            print(f"  {m.updated_at:%Y-%m-%d}  {m.name}")
+    if report.headless:
+        print(f"\nLeft behind by a forgotten overview ({len(report.headless)}) — retire?:")
+        for m in report.headless:
+            print(f"  {m.updated_at:%Y-%m-%d}  {m.name}")
     if report.recurring:
         print(f"\nRecurring events ({len(report.recurring)}) — promote to a memory?:")
         for c in report.recurring:
             print(f"  {c.count}x  {c.first_at:%Y-%m-%d} → {c.last_at:%Y-%m-%d}  {c.samples[0]}")
             for sample in c.samples[1:]:
                 print(f"      {sample}")
-    if not (report.duplicates or report.stale_state or report.zombies or report.recurring):
+    if not (
+        report.duplicates
+        or report.stale_state
+        or report.zombies
+        or report.drifted_overviews
+        or report.orphans
+        or report.headless
+        or report.recurring
+    ):
         print("Nothing to review — memory looks tidy.")
 
 
