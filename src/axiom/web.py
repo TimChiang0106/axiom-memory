@@ -35,14 +35,10 @@ OPEN_WARN = 5
 
 _CSS = """
 :root{color-scheme:light;
---bg:#F6F7FA;--surface:#FFFFFF;--line:#E3E5EC;--fg:#1B1F2A;--dim:#5B6173;--input:#7E8494;
+--bg:#FFFFFF;--surface:#FFFFFF;--line:#E3E5EC;--fg:#1B1F2A;--dim:#5B6173;--input:#7E8494;
 --primary:#1B1F2A;--primary-hover:#363A44;--on-primary:#FFFFFF;--selected:#EDEDEE;
 --ok:#1E7F4F;--warn:#9A5B00;--bad:#C62828;--info:#2F3A8F;
 --r-tag:4px;--r-ctl:12px;--r-card:20px}
-@media (prefers-color-scheme:dark){:root{color-scheme:dark;
---bg:#111318;--surface:#1A1D24;--line:#2A2E38;--fg:#E6E8EE;--dim:#9AA0AE;--input:#6B7180;
---primary:#E6E8EE;--primary-hover:#C9CCD4;--on-primary:#111318;--selected:#2A2E38;
---ok:#5FBF8A;--warn:#E0A458;--bad:#EF6B6B;--info:#9AA4F0}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font-size:16px;line-height:1.6;
@@ -142,8 +138,7 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
         "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<meta name='robots' content='noindex'>"
-        "<meta name='theme-color' content='#F6F7FA' media='(prefers-color-scheme: light)'>"
-        "<meta name='theme-color' content='#111318' media='(prefers-color-scheme: dark)'>"
+        "<meta name='theme-color' content='#FFFFFF'>"
         f"<title>{escape(title)} · Axiom</title>"
         f"<link rel='stylesheet' href='{_FONTS}'><style>{_CSS}</style></head>"
         f"<body><header><div class='bar'><span class='brand'>Axiom</span><nav>{nav}</nav>"
