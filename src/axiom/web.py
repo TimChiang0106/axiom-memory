@@ -34,53 +34,98 @@ TRIGGER_LABELS = {
 OPEN_WARN = 5
 
 _CSS = """
-:root{color-scheme:dark;--bg:#111;--card:#1b1b1b;--line:#2a2a2a;--fg:#e8e8e8;--dim:#8a8a8a;
---accent:#7fb3ff;--warn:#e0a35a;--bad:#e06c6c;--ok:#7cc48a}
+:root{color-scheme:light;
+--bg:#F6F7FA;--surface:#FFFFFF;--line:#E3E5EC;--fg:#1B1F2A;--dim:#5B6173;--input:#7E8494;
+--primary:#1B1F2A;--primary-hover:#363A44;--on-primary:#FFFFFF;--selected:#EDEDEE;
+--ok:#1E7F4F;--warn:#9A5B00;--bad:#C62828;--info:#2F3A8F;
+--r-tag:4px;--r-ctl:12px;--r-card:20px}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;
+--bg:#111318;--surface:#1A1D24;--line:#2A2E38;--fg:#E6E8EE;--dim:#9AA0AE;--input:#6B7180;
+--primary:#E6E8EE;--primary-hover:#C9CCD4;--on-primary:#111318;--selected:#2A2E38;
+--ok:#5FBF8A;--warn:#E0A458;--bad:#EF6B6B;--info:#9AA4F0}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 -apple-system,system-ui,
-"PingFang TC","Noto Sans TC",sans-serif}
-main{max-width:720px;margin:0 auto;padding:12px 14px 48px}
-nav{display:flex;gap:4px;position:sticky;top:0;background:var(--bg);padding:10px 0;z-index:1}
-nav a{flex:1;text-align:center;padding:8px;border-radius:8px;color:var(--dim);
-text-decoration:none}
-nav a.on{background:var(--card);color:var(--fg)}
-a{color:var(--accent)}
-h2{font-size:14px;color:var(--dim);font-weight:600;margin:24px 0 8px;letter-spacing:.04em}
-.status{font-size:18px;margin:8px 0 4px}
-.status .todo{color:var(--warn)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;
-margin:8px 0}
-.title{font-size:16px}
-.meta{font-size:13px;color:var(--dim);margin-top:2px}
-.flag{font-size:13px;color:var(--warn);margin-top:4px}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font-size:16px;line-height:1.6;
+font-family:"DM Sans","Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+font-variant-numeric:tabular-nums}
+header{position:sticky;top:0;z-index:1;background:var(--bg);border-bottom:1px solid var(--line)}
+.bar{max-width:720px;margin:0 auto;padding:0 16px;height:56px;display:flex;align-items:center;
+gap:4px}
+.brand{font-weight:700;margin-right:auto}
+nav{display:flex;gap:4px}
+nav a{padding:6px 12px;border-radius:var(--r-ctl);color:var(--dim);text-decoration:none;
+transition:background-color .15s}
+nav a:hover{background:var(--selected)}
+nav a.on{background:var(--selected);color:var(--fg);font-weight:600}
+main{max-width:720px;margin:0 auto;padding:0 16px 64px}
+a{color:var(--fg);text-decoration:underline;text-decoration-color:var(--input);
+text-underline-offset:3px}
+h1{font-size:22px;font-weight:700;line-height:1.4;margin:24px 0 4px}
+h2{display:flex;gap:8px;font-size:14px;font-weight:600;color:var(--dim);margin:28px 4px 8px}
+h2 .count{font-weight:400}
+.summary{margin:24px 4px 0}
+.summary .main{font-size:22px;font-weight:700;line-height:1.4}
+.summary .sub{color:var(--dim)}
+.summary .todo{color:var(--warn);font-weight:600}
+.list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);
+overflow:hidden;margin-bottom:12px}
+.row{padding:14px 16px}
+.row+.row{border-top:1px solid var(--line)}
+.title{font-weight:600}
+.meta{font-size:14px;color:var(--dim);margin-top:2px}
+.flag{font-size:14px;color:var(--warn);margin-top:4px}
 .bad{color:var(--bad)}
-.actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.tag{display:inline-block;font-size:12px;padding:0 6px;border-radius:var(--r-tag);
+background:var(--selected);color:var(--dim)}
+.actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
 .actions form{margin:0}
-button{background:#262626;color:var(--fg);border:1px solid var(--line);border-radius:8px;
-padding:7px 12px;font:inherit;font-size:14px}
-button.primary{background:#20324d;border-color:#2c4a73}
-details.more{display:inline-block}
-details.more summary{list-style:none;cursor:pointer;background:#262626;border:1px solid var(--line);
-border-radius:8px;padding:7px 12px;font-size:14px}
-details.more summary::-webkit-details-marker{display:none}
-details.more[open] .days{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-input[type=text],input[type=password]{background:#0d0d0d;color:var(--fg);
-border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:14px}
-.reject{display:flex;gap:6px;flex:1;min-width:220px}
-.reject input{flex:1}
-.empty{color:var(--dim);padding:8px 0}
-.week{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
-.day{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;
-min-height:72px}
-.day.today{border-color:#2c4a73}
-.day h3{font-size:13px;color:var(--dim);margin:0 0 6px;font-weight:600}
-.day .t{font-size:14px;margin:4px 0}
+.days .end{margin-left:auto}
+button,.more summary{appearance:none;display:inline-flex;align-items:center;min-height:36px;
+padding:0 14px;font:inherit;font-size:14px;line-height:1;color:var(--fg);background:var(--surface);
+border:1px solid var(--line);border-radius:var(--r-ctl);cursor:pointer;
+transition:background-color .15s,border-color .15s,color .15s}
+button:hover,.more summary:hover{background:var(--selected)}
+button.primary{background:var(--primary);border-color:var(--primary);color:var(--on-primary);
+font-weight:600}
+button.primary:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+button.quiet{background:transparent;border-color:transparent;color:var(--dim)}
+button.quiet:hover{background:transparent;color:var(--bad)}
+button:focus-visible,.more summary:focus-visible,input:focus-visible,a:focus-visible{
+outline:2px solid var(--fg);outline-offset:2px}
+.more summary{list-style:none}
+.more summary::-webkit-details-marker{display:none}
+.more[open]{flex-basis:100%}
+.more[open] summary{background:var(--selected);font-weight:600}
+.more .days{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+input[type=text],input[type=password]{min-height:40px;padding:0 12px;font:inherit;font-size:16px;
+color:var(--fg);background:var(--surface);border:1px solid var(--input);border-radius:var(--r-ctl)}
+.reject{display:flex;gap:8px;flex:1;min-width:220px}
+.reject input{flex:1;min-width:0;min-height:36px;font-size:14px}
+.empty{color:var(--dim);padding:14px 16px}
+.err{margin:16px 0 0;padding:10px 14px;font-size:14px;color:var(--bad);background:var(--surface);
+border:1px solid currentColor;border-radius:var(--r-ctl)}
+.day{display:grid;grid-template-columns:96px 1fr;gap:12px}
+.day .d{font-size:14px;color:var(--dim);padding-top:1px}
+.day.today{background:var(--selected)}
+.day.today .d{color:var(--fg);font-weight:600}
+.day .t+.t{margin-top:4px}
 .done{text-decoration:line-through;color:var(--dim)}
-.body{white-space:pre-wrap;font-size:14px;margin-top:8px;color:#cfcfcf}
-.stats{font-size:14px;margin-top:4px}
-details summary{cursor:pointer;color:var(--dim);font-size:14px}
-.err{background:#3a1d1d;border:1px solid #5a2a2a;border-radius:8px;padding:8px 10px;margin:8px 0}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.metrics .n{display:block;font-size:20px;font-weight:700;line-height:1.3}
+.metrics .l{font-size:13px;color:var(--dim)}
+details.ov{margin-top:12px}
+details.ov summary{cursor:pointer;color:var(--dim);font-size:14px}
+.body{white-space:pre-wrap;font-size:15px;margin-top:8px}
+.row>.body:first-child{margin-top:0}
+.tags{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0 16px;font-size:14px;
+color:var(--dim)}
+details.ov .body{padding-top:12px;border-top:1px solid var(--line)}
+.login{max-width:360px;margin:15vh auto 0}
+.login form{display:flex;flex-direction:column;gap:12px;margin-top:16px}
+.login button{justify-content:center;min-height:40px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
 """
+_FONTS = "https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&display=swap"
 
 
 def _page(title: str, active: str, body: str) -> HTMLResponse:
@@ -90,15 +135,19 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
         ("projects", "/app/projects", "專案"),
     ]
     nav = "".join(
-        f'<a href="{href}" class="{"on" if key == active else ""}">{label}</a>'
+        f'<a href="{href}"{" class=on aria-current=page" if key == active else ""}>{label}</a>'
         for key, href, label in tabs
     )
     return HTMLResponse(
         "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<meta name='robots' content='noindex'>"
-        f"<title>{escape(title)} · Axiom</title><style>{_CSS}</style></head>"
-        f"<body><main><nav>{nav}</nav>{body}</main></body></html>"
+        "<meta name='theme-color' content='#F6F7FA' media='(prefers-color-scheme: light)'>"
+        "<meta name='theme-color' content='#111318' media='(prefers-color-scheme: dark)'>"
+        f"<title>{escape(title)} · Axiom</title>"
+        f"<link rel='stylesheet' href='{_FONTS}'><style>{_CSS}</style></head>"
+        f"<body><header><div class='bar'><span class='brand'>Axiom</span><nav>{nav}</nav>"
+        f"</div></header><main>{body}</main></body></html>"
     )
 
 
@@ -137,8 +186,9 @@ def _button(
     confirm: str = "",
 ) -> str:
     onsubmit = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
+    end = ' class="end"' if action == "drop" else ""
     return (
-        f'<form method="post" action="/app/tasks/{task_id}/{action}"{onsubmit}>'
+        f'<form method="post" action="/app/tasks/{task_id}/{action}"{end}{onsubmit}>'
         f'<input type="hidden" name="next" value="{back}">{extra}'
         f'<button class="{cls}">{label}</button></form>'
     )
@@ -167,8 +217,6 @@ def _task_card(task: Task, today: date, *, back: str = "/app") -> str:
             back=back,
             extra='<input type="hidden" name="to" value="tomorrow">',
         )
-        + '<details class="more"><summary>本週其他天</summary>'
-        + f'<div class="days">{days}</div></details>'
         + _button(
             task.id,
             "defer",
@@ -176,10 +224,13 @@ def _task_card(task: Task, today: date, *, back: str = "/app") -> str:
             back=back,
             extra='<input type="hidden" name="to" value="someday">',
         )
-        + _button(task.id, "drop", "刪除", back=back, confirm="刪除這件事？")
+        + '<details class="more"><summary>更多</summary><div class="days">'
+        + days
+        + _button(task.id, "drop", "刪除", back=back, cls="quiet", confirm="刪除這件事？")
+        + "</div></details>"
     )
     return (
-        f'<div class="card"><div class="title">{escape(task.title)}</div>'
+        f'<div class="row"><div class="title">{escape(task.title)}</div>'
         f'{_meta(task, today)}{flags}<div class="actions">{actions}</div></div>'
     )
 
@@ -204,7 +255,7 @@ def _suggestion_card(task: Task, today: date) -> str:
         "<button>拒絕</button></form>"
     )
     return (
-        f'<div class="card"><div class="title">{escape(task.title)}</div>'
+        f'<div class="row"><div class="title">{escape(task.title)}</div>'
         f'{_meta(task, today)}{evidence}<div class="actions">'
         f"{_button(task.id, 'confirm', '確認', back='/app', cls='primary')}{reject}</div></div>"
     )
@@ -214,7 +265,8 @@ def _section(title: str, cards: list[str], *, empty: str | None = None) -> str:
     if not cards and empty is None:
         return ""
     inner = "".join(cards) if cards else f'<div class="empty">{empty}</div>'
-    return f"<h2>{title}</h2>{inner}"
+    count = f'<span class="count">{len(cards)}</span>' if cards else ""
+    return f'<section><h2>{title}{count}</h2><div class="list">{inner}</div></section>'
 
 
 def _inline_md(text: str) -> str:
@@ -254,11 +306,14 @@ def build_routes(
         view = await tasks.today_view()
         today = view.today
         n_today = len(view.overdue) + len(view.due_today)
-        status = f"今天 {n_today} 件・其他 {view.arranged} 件都已排好日期"
+        status = (
+            f'<div class="main">今天 {n_today} 件</div>'
+            f'<div class="sub">其他 {view.arranged} 件都已排好日期</div>'
+        )
         if view.unscheduled:
             status += f'<div class="todo">{len(view.unscheduled)} 件還沒安排</div>'
         error = request.query_params.get("error")
-        body = f'<div class="status">{status}</div>'
+        body = f'<div class="summary">{status}</div>'
         if error:
             body += f'<div class="err">{escape(error)}</div>'
         body += _section("逾期", [_task_card(t, today) for t in view.overdue])
@@ -270,7 +325,7 @@ def build_routes(
         )
         body += _section("AI 建議待確認", [_suggestion_card(t, today) for t in view.suggested])
         if not (view.overdue or view.due_today or view.unscheduled or view.suggested):
-            body += '<div class="empty">今天沒有要處理的事。</div>'
+            body += '<div class="list"><div class="empty">今天沒有要處理的事。</div></div>'
         return _page("今天", "today", body)
 
     async def week_page(request: Request) -> Response:
@@ -287,26 +342,26 @@ def build_routes(
                     f'<div class="t{" done" if t.status == "done" else ""}">{escape(t.title)}</div>'
                     for t in day_tasks
                 )
-                or '<div class="t empty">—</div>'
+                or '<div class="t meta">—</div>'
             )
-            cls = "day today" if d == today else "day"
+            cls = "row day today" if d == today else "row day"
             cols.append(
-                f'<div class="{cls}"><h3>週{WEEKDAYS[i]} {d.month}/{d.day}</h3>{items}</div>'
+                f'<div class="{cls}"><div class="d">週{WEEKDAYS[i]} {d.month}/{d.day}</div>'
+                f"<div>{items}</div></div>"
             )
-        body = f"<h2>{_day(view.monday)} – {_day(view.monday + timedelta(days=6))}</h2>"
-        body += f'<div class="week">{"".join(cols)}</div>'
+        body = f"<h1>{_day(view.monday)} – {_day(view.monday + timedelta(days=6))}</h1>"
+        body += f'<div class="list">{"".join(cols)}</div>'
         groups: dict[str, list[Task]] = {}
         for t in view.done:
             groups.setdefault(t.project or "未分專案", []).append(t)
-        body += f"<h2>本週已完成（{len(view.done)}）</h2>"
-        if not groups:
-            body += '<div class="empty">還沒有。</div>'
-        for project, items in groups.items():
-            lis = "".join(f'<div class="meta">{escape(t.title)}</div>' for t in items)
-            body += (
-                f'<div class="card"><div class="title">{escape(project)}（{len(items)}）</div>'
-                f"{lis}</div>"
-            )
+        rows = [
+            f'<div class="row"><div class="title">{escape(project)}'
+            f' <span class="tag">{len(items)}</span></div>'
+            + "".join(f'<div class="meta">{escape(t.title)}</div>' for t in items)
+            + "</div>"
+            for project, items in groups.items()
+        ]
+        body += _section("本週已完成", rows, empty="還沒有。")
         return _page("本週", "week", body)
 
     async def projects_page(request: Request) -> Response:
@@ -323,15 +378,24 @@ def build_routes(
         def card(project: str | None, overview: Memory | None) -> str:
             s = stats.get(project)
             name = project or "未分專案"
-            line = (
-                f"open {s.open if s else 0}・本週完成 {s.done_this_week if s else 0}"
-                f"・總完成 {s.done_total if s else 0}"
+            metrics = "".join(
+                f'<div><span class="n">{n}</span><span class="l">{label}</span></div>'
+                for n, label in (
+                    (s.open if s else 0, "進行中"),
+                    (s.done_this_week if s else 0, "本週完成"),
+                    (s.done_total if s else 0, "總完成"),
+                )
             )
-            if s and s.next_due:
-                line += f"・最近截止 {_day(s.next_due, today)}"
+            due = (
+                f'<div class="meta">最近截止 {_day(s.next_due, today)}</div>'
+                if s and s.next_due
+                else ""
+            )
             flags = ""
             if s and s.open > OPEN_WARN:
-                flags += f'<div class="flag">open {s.open} 筆，超過 {OPEN_WARN} 筆，該收斂了</div>'
+                flags += (
+                    f'<div class="flag">進行中 {s.open} 筆，超過 {OPEN_WARN} 筆，該收斂了</div>'
+                )
             if overview and overview.name in drifted:
                 newer = "、".join(drifted[overview.name].newer_related)
                 flags += f'<div class="flag">總覽落後於：{escape(newer)}</div>'
@@ -341,7 +405,8 @@ def build_routes(
                     f'<a href="/app/memory/{escape(o.name)}">{escape(o.name)}</a>' for o in mine
                 )
                 flags += (
-                    f'<details><summary class="flag">{len(mine)} 筆記憶沒連到總覽</summary>'
+                    '<details class="ov">'
+                    f'<summary class="flag">{len(mine)} 筆記憶沒連到總覽</summary>'
                     f'<div class="meta">{names}</div></details>'
                 )
             if s and s.stale_open:
@@ -353,12 +418,13 @@ def build_routes(
             body = ""
             if overview:
                 body = (
-                    f"<details><summary>總覽（{overview.updated_at:%Y-%m-%d} 更新）</summary>"
+                    '<details class="ov">'
+                    f"<summary>總覽（{overview.updated_at:%Y-%m-%d} 更新）</summary>"
                     f'<div class="body">{_inline_md(overview.content)}</div></details>'
                 )
             return (
-                f'<div class="card"><div class="title">{escape(name)}</div>'
-                f'<div class="stats">{line}</div>{flags}{body}</div>'
+                f'<div class="list"><div class="row"><div class="title">{escape(name)}</div>'
+                f'{due}<div class="metrics">{metrics}</div>{flags}{body}</div></div>'
             )
 
         known = {o.name.removesuffix("-overview") for o in overviews}
@@ -371,7 +437,10 @@ def build_routes(
         )
         cards = [card(o.name.removesuffix("-overview"), o) for o in ordered]
         cards += [card(p, None) for p in stats if p not in known]
-        return _page("專案", "projects", "".join(cards) or '<div class="empty">沒有專案。</div>')
+        body = "<h1>專案</h1>" + (
+            "".join(cards) or '<div class="list"><div class="empty">沒有專案。</div></div>'
+        )
+        return _page("專案", "projects", body)
 
     async def memory_page(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
@@ -379,17 +448,21 @@ def build_routes(
         memories = await get_memories()
         memory = await memories.get(request.path_params["name"])
         if memory is None:
-            return _page("找不到", "", '<div class="empty">找不到這筆記憶。</div>')
+            return _page(
+                "找不到", "", '<div class="list"><div class="empty">找不到這筆記憶。</div></div>'
+            )
         related = "、".join(
             f'<a href="/app/memory/{escape(n)}">{escape(n)}</a>' for n in memory.related
         )
         body = (
-            f'<div class="card"><div class="title">{escape(memory.name)}</div>'
+            f"<h1>{escape(memory.name)}</h1>"
             f'<div class="meta">{escape(memory.description)}</div>'
-            f'<div class="meta">{memory.type}・{memory.category}・'
-            f"{memory.updated_at:%Y-%m-%d} 更新</div>"
-            f'<div class="body">{_inline_md(memory.content)}</div>'
-            + (f'<div class="meta">相關：{related}</div>' if related else "")
+            f'<div class="tags"><span class="tag">{memory.type}</span>'
+            f'<span class="tag">{memory.category}</span>'
+            f"<span>{memory.updated_at:%Y-%m-%d} 更新</span></div>"
+            f'<div class="list"><div class="row"><div class="body">'
+            f"{_inline_md(memory.content)}</div></div>"
+            + (f'<div class="row meta">相關：{related}</div>' if related else "")
             + "</div>"
         )
         return _page(memory.name, "", body)
@@ -446,10 +519,12 @@ def build_routes(
         elif await auth.identify(request.headers, request.cookies):
             return RedirectResponse("/app", status_code=303)
         body = (
-            f"<h2>登入</h2>{error}"
-            '<form method="post" class="actions"><input type="password" name="token" '
-            'placeholder="Service token" autocomplete="current-password">'
-            '<button class="primary">進入</button></form>'
+            f'<div class="login"><h1>登入 Axiom</h1>'
+            '<div class="meta">輸入 service token，這台裝置會記住 30 天。</div>'
+            f'{error}<form method="post"><input type="password" name="token" '
+            'placeholder="Service token" aria-label="Service token" '
+            'autocomplete="current-password">'
+            '<button class="primary">進入</button></form></div>'
         )
         return _page("登入", "", body)
 
