@@ -40,6 +40,10 @@ services:
       AXIOM_ALLOWED_EMAILS: ${AXIOM_ALLOWED_EMAILS:?set in .env}
       AXIOM_SERVICE_TOKEN: ${AXIOM_SERVICE_TOKEN:-}
       AXIOM_GEMINI_API_KEY: ${AXIOM_GEMINI_API_KEY:-}
+      AXIOM_TIMEZONE: ${AXIOM_TIMEZONE:-UTC}
+      # Cloudflare Access in front of /app (see README); empty = service token only.
+      AXIOM_CF_ACCESS_TEAM_DOMAIN: ${AXIOM_CF_ACCESS_TEAM_DOMAIN:-}
+      AXIOM_CF_ACCESS_AUD: ${AXIOM_CF_ACCESS_AUD:-}
       PORT: "8080"
     ports:
       - "18080:8080"

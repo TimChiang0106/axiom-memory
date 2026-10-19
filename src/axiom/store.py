@@ -619,10 +619,25 @@ class MemoryStore:
             zombie_days,
             zombie_max_use_count,
         )
-        # A project overview that its own linked details have overtaken: the
-        # single source of truth is behind what it points at (the gateway-rollout
-        # case — a verification result newer than the plan it should revise).
-        drift_rows = await self._pool.fetch(
+        headless_rows = await self._pool.fetch(_HEADLESS_SQL, _OVERVIEW_SUFFIX, None)
+        return ReviewReport(
+            duplicates=[DuplicatePair(**dict(r)) for r in dup_rows],
+            stale_state=[StaleMemory(**dict(r)) for r in stale_rows],
+            zombies=[StaleMemory(**dict(r)) for r in zombie_rows],
+            drifted_overviews=await self.drifted_overviews(),
+            orphans=await self.orphans(),
+            headless=[MemorySummary(**dict(r)) for r in headless_rows],
+            recurring=await self.recurring_events(
+                window_days=event_window_days, min_count=event_min_count
+            ),
+        )
+
+    async def drifted_overviews(self) -> list[DriftedOverview]:
+        """Project overviews their own linked details have overtaken: the
+        single source of truth is behind what it points at (the
+        gateway-rollout case — a verification result newer than the plan it
+        should revise)."""
+        rows = await self._pool.fetch(
             """
             SELECT o.name, o.updated_at,
                    array_agg(r.name ORDER BY r.updated_at DESC) AS newer_related
@@ -634,11 +649,19 @@ class MemoryStore:
             """,
             _OVERVIEW_SUFFIX,
         )
-        # Notes that belong to a project with an overview — they share its name
-        # prefix — but aren't linked from it: the stray fifth memory the
-        # overview should have folded in. Scoped to prefixes that actually have
-        # an overview, so projects with no overview don't flood the bucket.
-        orphan_rows = await self._pool.fetch(
+        return [
+            DriftedOverview(
+                name=r["name"], updated_at=r["updated_at"], newer_related=list(r["newer_related"])
+            )
+            for r in rows
+        ]
+
+    async def orphans(self) -> list[MemorySummary]:
+        """Notes that belong to a project with an overview — they share its
+        name prefix — but aren't linked from it: the stray fifth memory the
+        overview should have folded in. Scoped to prefixes that actually have
+        an overview, so projects with no overview don't flood the bucket."""
+        rows = await self._pool.fetch(
             """
             WITH overviews AS (
                 SELECT name,
@@ -656,34 +679,15 @@ class MemoryStore:
             """,
             _OVERVIEW_SUFFIX,
         )
-        headless_rows = await self._pool.fetch(_HEADLESS_SQL, _OVERVIEW_SUFFIX, None)
-        return ReviewReport(
-            duplicates=[DuplicatePair(**dict(r)) for r in dup_rows],
-            stale_state=[StaleMemory(**dict(r)) for r in stale_rows],
-            zombies=[StaleMemory(**dict(r)) for r in zombie_rows],
-            drifted_overviews=[
-                DriftedOverview(
-                    name=r["name"],
-                    updated_at=r["updated_at"],
-                    newer_related=list(r["newer_related"]),
-                )
-                for r in drift_rows
-            ],
-            orphans=[
-                MemorySummary(
-                    name=r["name"],
-                    description=r["description"],
-                    type=r["type"],
-                    category=r["category"],
-                    updated_at=r["updated_at"],
-                )
-                for r in orphan_rows
-            ],
-            headless=[MemorySummary(**dict(r)) for r in headless_rows],
-            recurring=await self.recurring_events(
-                window_days=event_window_days, min_count=event_min_count
-            ),
+        return [MemorySummary(**dict(r)) for r in rows]
+
+    async def overviews(self) -> list[Memory]:
+        """Every `<project>-overview` memory, for the project page."""
+        rows = await self._pool.fetch(
+            f"SELECT {_COLUMNS} FROM memories m WHERE m.name LIKE '%' || $1 ORDER BY m.name",
+            _OVERVIEW_SUFFIX,
         )
+        return [Memory.from_row(r) for r in rows]
 
     async def _neighbors(
         self,

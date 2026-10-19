@@ -9,12 +9,16 @@ import asyncpg
 import pytest
 
 from axiom.db import create_pool, run_migrations
+from axiom.documents import DocumentStore
 from axiom.store import MemoryStore
+from axiom.tasks import TaskStore
 
-ADMIN_DSN = os.environ.get(
-    "AXIOM_TEST_ADMIN_DSN", "postgresql://axiom:axiom@localhost:5432/axiom"
-)
+ADMIN_DSN = os.environ.get("AXIOM_TEST_ADMIN_DSN", "postgresql://axiom:axiom@localhost:5432/axiom")
 TEST_DB = "axiom_test"
+TRUNCATE = (
+    "TRUNCATE memories, events, memory_versions, tasks, documents, document_versions "
+    "RESTART IDENTITY"
+)
 
 
 def _test_dsn() -> str:
@@ -39,5 +43,17 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
 
 @pytest.fixture
 async def store(pool: asyncpg.Pool) -> MemoryStore:
-    await pool.execute("TRUNCATE memories, events, memory_versions")
+    await pool.execute(TRUNCATE)
     return MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+
+
+@pytest.fixture
+async def tasks(pool: asyncpg.Pool) -> TaskStore:
+    await pool.execute(TRUNCATE)
+    return TaskStore(pool)
+
+
+@pytest.fixture
+async def documents(pool: asyncpg.Pool) -> DocumentStore:
+    await pool.execute(TRUNCATE)
+    return DocumentStore(pool)

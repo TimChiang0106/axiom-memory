@@ -6,15 +6,17 @@ not depend on each client's custom instructions alone.
 """
 
 import asyncio
-from typing import Annotated
+from datetime import date
+from typing import Annotated, Literal
 
 from fastmcp import Context, FastMCP
 from fastmcp.server.dependencies import get_http_request
 from pydantic import Field
 
-from axiom.auth import build_auth
+from axiom.auth import AppAuth, build_auth
 from axiom.config import get_settings
 from axiom.db import create_pool, run_migrations
+from axiom.documents import DocumentStore
 from axiom.embeddings import GeminiEmbedder
 from axiom.models import (
     NAME_PATTERN,
@@ -27,47 +29,86 @@ from axiom.models import (
     ReviewReport,
 )
 from axiom.store import MemoryStore
+from axiom.tasks import TaskError, TaskStore
+from axiom.web import build_routes
 
 _store: MemoryStore | None = None
+_tasks: TaskStore | None = None
+_documents: DocumentStore | None = None
 _store_lock = asyncio.Lock()
 
 
+async def _init() -> None:
+    """Open the pool, migrate, and build every store over it — once."""
+    global _store, _tasks, _documents
+    async with _store_lock:
+        if _store is not None:
+            return
+        settings = get_settings()
+        pool = await create_pool(settings.database_url)
+        await run_migrations(pool)
+        embedder = None
+        if settings.gemini_api_key:
+            embedder = GeminiEmbedder(
+                api_key=settings.gemini_api_key,
+                model=settings.embedding_model,
+                dims=settings.embedding_dims,
+                query_timeout_seconds=settings.embedding_query_timeout_seconds,
+            )
+        _tasks = TaskStore(
+            pool,
+            embedder=embedder,
+            timezone=settings.timezone,
+            suggestion_daily_limit=settings.suggestion_daily_limit,
+            suggestion_ttl_days=settings.suggestion_ttl_days,
+            rejected_window_days=settings.rejected_window_days,
+            similar_trigram=settings.task_similar_trigram,
+            similar_semantic=settings.task_similar_semantic,
+            stale_open_days=settings.stale_open_days,
+        )
+        # Suggestions that lapsed while the server was down expire at startup.
+        await _tasks.expire_suggestions()
+        _documents = DocumentStore(pool)
+        _store = MemoryStore(
+            pool,
+            dedup_threshold=settings.dedup_threshold,
+            semantic_dedup_threshold=settings.semantic_dedup_threshold,
+            recall_threshold=settings.recall_threshold,
+            recall_half_life_days=settings.recall_half_life_days,
+            state_half_life_days=settings.state_half_life_days,
+            procedural_half_life_days=settings.procedural_half_life_days,
+            use_count_dampening=settings.use_count_dampening,
+            lexical_weight=settings.lexical_weight,
+            inferred_weight=settings.inferred_weight,
+            stale_state_days=settings.stale_state_days,
+            event_similarity=settings.event_similarity,
+            event_retention_days=settings.event_retention_days,
+            embedder=embedder,
+            semantic_floor=settings.semantic_floor,
+            write_neighbor_threshold=settings.write_neighbor_threshold,
+            write_neighbor_count=settings.write_neighbor_count,
+        )
+
+
 async def get_store() -> MemoryStore:
-    global _store
     if _store is None:
-        async with _store_lock:
-            if _store is None:
-                settings = get_settings()
-                pool = await create_pool(settings.database_url)
-                await run_migrations(pool)
-                embedder = None
-                if settings.gemini_api_key:
-                    embedder = GeminiEmbedder(
-                        api_key=settings.gemini_api_key,
-                        model=settings.embedding_model,
-                        dims=settings.embedding_dims,
-                        query_timeout_seconds=settings.embedding_query_timeout_seconds,
-                    )
-                _store = MemoryStore(
-                    pool,
-                    dedup_threshold=settings.dedup_threshold,
-                    semantic_dedup_threshold=settings.semantic_dedup_threshold,
-                    recall_threshold=settings.recall_threshold,
-                    recall_half_life_days=settings.recall_half_life_days,
-                    state_half_life_days=settings.state_half_life_days,
-                    procedural_half_life_days=settings.procedural_half_life_days,
-                    use_count_dampening=settings.use_count_dampening,
-                    lexical_weight=settings.lexical_weight,
-                    inferred_weight=settings.inferred_weight,
-                    stale_state_days=settings.stale_state_days,
-                    event_similarity=settings.event_similarity,
-                    event_retention_days=settings.event_retention_days,
-                    embedder=embedder,
-                    semantic_floor=settings.semantic_floor,
-                    write_neighbor_threshold=settings.write_neighbor_threshold,
-                    write_neighbor_count=settings.write_neighbor_count,
-                )
+        await _init()
+    assert _store is not None
     return _store
+
+
+async def get_tasks() -> TaskStore:
+    if _tasks is None:
+        await _init()
+    assert _tasks is not None
+    return _tasks
+
+
+async def get_documents() -> DocumentStore:
+    if _documents is None:
+        await _init()
+    assert _documents is not None
+    return _documents
 
 
 def _client_name(ctx: Context) -> str:
@@ -106,6 +147,10 @@ mcp = FastMCP(
         "memory (status with a date, decisions in force, abandoned approaches, open "
         "items, key detail memories in `related`): `get` it first when asked where a "
         "project stands, and update it after a substantial session on that project. "
+        "Overviews hold no to-do lists: when the user mentions something they need "
+        "to do or a deadline, `task` add it (source 'stated', with planned_date if "
+        "they said which day). Long documents (specs, plans, notes) go in `document`, "
+        "not in a memory; a memory can point at one with `doc:<name>`. "
         "Give context-bound memories (a job's templates, a project's specifics) the "
         "overview's name prefix and link them from it, so forgetting the overview "
         "retires them as a group; keep portable know-how in `topics` without the prefix."
@@ -299,8 +344,7 @@ async def recall(
     related = await store.summaries_by_names(linked)
     if related:
         result["related"] = [
-            {"name": r.name, "description": r.description, "category": r.category}
-            for r in related
+            {"name": r.name, "description": r.description, "category": r.category} for r in related
         ]
     return result
 
@@ -407,3 +451,233 @@ async def list_memories(
     scan the index directly."""
     store = await get_store()
     return await store.list_all(category=category)
+
+
+def _task_payload(task) -> dict:
+    return task.model_dump(mode="json", exclude_none=True)
+
+
+@mcp.tool
+async def task(
+    action: Annotated[
+        Literal["add", "update", "done", "drop", "confirm", "reject", "defer", "list"],
+        Field(description="What to do; see the tool description."),
+    ],
+    id: Annotated[
+        int | None,
+        Field(description="Task id — required for every action except add and list."),
+    ] = None,
+    title: Annotated[
+        str | None, Field(max_length=300, description="Short imperative title.")
+    ] = None,
+    project: Annotated[
+        str | None,
+        Field(
+            description=(
+                "The project's overview name prefix (e.g. 'axiom' for axiom-overview). "
+                "Must match an existing overview; omit for tasks outside any project. "
+                "On list: filter by project."
+            )
+        ),
+    ] = None,
+    source: Annotated[
+        Literal["stated", "ai_suggested"],
+        Field(
+            description=(
+                "add only. 'stated': the user said it (opens immediately). "
+                "'ai_suggested': your own proposal — waits for the user to confirm."
+            )
+        ),
+    ] = "stated",
+    due_date: Annotated[date | None, Field(description="Deadline, YYYY-MM-DD.")] = None,
+    planned_date: Annotated[
+        date | None, Field(description="The day the user plans to do it, YYYY-MM-DD.")
+    ] = None,
+    someday: Annotated[
+        bool | None, Field(description="Parked for later with no date (add/update/confirm).")
+    ] = None,
+    evidence: Annotated[
+        dict | None,
+        Field(
+            description=(
+                'Why this task exists: {"trigger": ..., "memories": [exact memory '
+                'names], "note": optional}. Required for ai_suggested, where trigger '
+                "must be unrecorded_commitment, due_soon, or overview_stale and at "
+                "least one cited memory must exist."
+            )
+        ),
+    ] = None,
+    to: Annotated[
+        str | None,
+        Field(description="defer only: 'tomorrow', 'someday', or a date YYYY-MM-DD."),
+    ] = None,
+    reason: Annotated[
+        str | None, Field(description="reject only: why, in the user's words.")
+    ] = None,
+    clear: Annotated[
+        list[str] | None,
+        Field(description="update only: fields to blank out — project, due_date, planned_date."),
+    ] = None,
+    status: Annotated[
+        list[Literal["suggested", "open", "done", "dropped", "expired"]] | None,
+        Field(description="list only: filter by status."),
+    ] = None,
+    date_from: Annotated[
+        date | None, Field(description="list only: planned, due, or done on/after this day.")
+    ] = None,
+    date_to: Annotated[
+        date | None, Field(description="list only: planned, due, or done on/before this day.")
+    ] = None,
+) -> dict:
+    """The user's to-do list (their work home page reads it). Use this — not
+    memories, not project overviews — for anything they need to do.
+
+    - add: whenever the user says they need to, will, or should do something,
+      or mentions a deadline, add it right away with source='stated'. If they
+      said which day they'll do it, set planned_date; a deadline goes in
+      due_date; "later / no rush" is someday=true. One task per action item.
+    - add with source='ai_suggested': only for something the user did not ask
+      for but plainly needs — a commitment they made but never recorded
+      (unrecorded_commitment), a deadline coming up (due_soon), or a project
+      overview that has fallen behind (overview_stale). Cite the memories it
+      comes from in evidence. The server allows a few per day and refuses
+      look-alikes of open tasks or recently rejected ones; a refusal is final
+      for today — do not rephrase and retry. Unanswered suggestions expire
+      after 5 days.
+    - update: change title / project / dates (pass `clear` to blank a field).
+    - done / drop: finished, or no longer wanted.
+    - confirm / reject: the user's answer to a suggestion (reject with their
+      reason, so the same idea is not proposed again).
+    - defer: move an open task to 'tomorrow', a date, or 'someday'.
+    - list: with no filters, what needs a look today — overdue, planned or due
+      today, unscheduled (open with no day and not someday — aim to give each
+      a day), and suggestions awaiting an answer — plus how many open tasks are
+      already arranged for later. With project / status / date filters, a flat
+      list.
+    """
+    tasks = await get_tasks()
+    try:
+        if action == "list":
+            if project or status or date_from or date_to:
+                found = await tasks.find(
+                    project=project, statuses=status, date_from=date_from, date_to=date_to
+                )
+                return {"tasks": [_task_payload(t) for t in found]}
+            view = await tasks.today_view()
+            return {
+                "today": view.today.isoformat(),
+                "overdue": [_task_payload(t) for t in view.overdue],
+                "due_today": [_task_payload(t) for t in view.due_today],
+                "unscheduled": [_task_payload(t) for t in view.unscheduled],
+                "suggested": [_task_payload(t) for t in view.suggested],
+                "arranged_for_later": view.arranged,
+            }
+        if action == "add":
+            if not title:
+                raise TaskError("add needs a title.")
+            created = await tasks.add(
+                title=title,
+                source=source,
+                project=project,
+                due_date=due_date,
+                planned_date=planned_date,
+                someday=bool(someday),
+                evidence=evidence,
+            )
+            return {"status": created.status, "task": _task_payload(created)}
+        if id is None:
+            raise TaskError(f"{action} needs the task id.")
+        if action == "update":
+            result = await tasks.update(
+                id,
+                title=title,
+                project=project,
+                due_date=due_date,
+                planned_date=planned_date,
+                someday=someday,
+                clear=clear,
+            )
+        elif action == "done":
+            result = await tasks.done(id)
+        elif action == "drop":
+            result = await tasks.drop(id)
+        elif action == "confirm":
+            result = await tasks.confirm(
+                id, planned_date=planned_date, due_date=due_date, someday=bool(someday)
+            )
+        elif action == "reject":
+            result = await tasks.reject(id, reason=reason)
+        else:  # defer
+            if not to:
+                raise TaskError("defer needs `to`: 'tomorrow', 'someday', or YYYY-MM-DD.")
+            target = to if to in ("tomorrow", "someday") else date.fromisoformat(to)
+            result = await tasks.defer(id, to=target)  # type: ignore[arg-type]
+        return {"status": result.status, "task": _task_payload(result)}
+    except TaskError as e:
+        return {"error": str(e), **e.detail}
+    except ValueError as e:
+        return {"error": str(e)}
+
+
+@mcp.tool
+async def document(
+    ctx: Context,
+    action: Annotated[Literal["put", "get", "list"], Field(description="put, get, or list.")],
+    name: Annotated[
+        str | None,
+        Field(
+            pattern=r"^(doc:)?[a-z0-9][a-z0-9-]{1,63}$",
+            description=(
+                "Stable kebab-case slug (put/get), e.g. 'axiom-work-os-spec'; a "
+                "`doc:` prefix from a memory reference is accepted."
+            ),
+        ),
+    ] = None,
+    title: Annotated[str | None, Field(max_length=300, description="put: document title.")] = None,
+    body: Annotated[str | None, Field(description="put: the full text, markdown.")] = None,
+    project: Annotated[
+        str | None,
+        Field(description="Project overview name prefix it belongs to (put), or filter (list)."),
+    ] = None,
+    history: Annotated[bool, Field(description="get: also return past versions.")] = False,
+) -> dict:
+    """Long-form documents — specs, plans, meeting notes, drafts: anything too
+    long for a memory. Not searchable through recall; fetch by name.
+
+    - put: create or overwrite by name (the previous version is kept). Write
+      the whole body each time. Then, if a memory should lead to it, mention
+      `doc:<name>` in that memory's content.
+    - get: the full document by name (a `doc:<name>` reference in a memory
+      points here); history=true adds earlier versions.
+    - list: names, titles, and sizes, optionally for one project.
+    """
+    docs = await get_documents()
+    if action == "list":
+        return {
+            "documents": [d.model_dump(mode="json") for d in await docs.list_all(project=project)]
+        }
+    if not name:
+        return {"error": f"{action} needs a name."}
+    name = name.removeprefix("doc:")
+    if action == "get":
+        doc = await docs.get(name)
+        if doc is None:
+            return {"found": False, "name": name}
+        result: dict = {"found": True, "document": doc.model_dump(mode="json")}
+        if history:
+            result["versions"] = [v.model_dump(mode="json") for v in await docs.history(doc.name)]
+        return result
+    if not title or body is None:
+        return {"error": "put needs title and body."}
+    if project is not None and project not in await (await get_tasks()).known_projects():
+        return {"error": f"No project overview named '{project}-overview'."}
+    status, doc = await docs.put(
+        name=name, title=title, body=body, project=project, source_app=_client_name(ctx)
+    )
+    return {"status": status, "name": doc.name, "chars": len(doc.body)}
+
+
+for _route in build_routes(
+    auth=AppAuth.from_settings(get_settings()), get_tasks=get_tasks, get_memories=get_store
+):
+    mcp.custom_route(_route.path, methods=sorted(_route.methods or []))(_route.endpoint)  # type: ignore[arg-type]

@@ -21,8 +21,13 @@ Local stdio development needs none of this: build_auth returns None when
 nothing is configured, and the transport is already private.
 """
 
+import asyncio
+import hashlib
+import hmac
 import logging
+from collections.abc import Mapping
 
+import jwt
 from fastmcp.server.auth import AuthProvider, MultiAuth, TokenVerifier
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -105,3 +110,102 @@ def build_auth(settings: Settings) -> AuthProvider | None:
     if google and service:
         return MultiAuth(server=google, verifiers=[service], required_scopes=[])
     return google or service
+
+
+class AppAuth:
+    """Authentication for the /app pages, which expose every memory.
+
+    The MCP providers above don't cover custom HTTP routes, so the pages check
+    for themselves. Two ways in, either one enough:
+
+    - A Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`, added by Cloudflare
+      when an Access application sits in front of /app), verified against the
+      team's signing keys and AUD tag, for an AXIOM_ALLOWED_EMAILS address.
+      Checking it here, not just trusting that Access is in front, means a
+      request that reaches the origin some other way (the host port, a
+      misconfigured Access policy) still gets nothing.
+    - AXIOM_SERVICE_TOKEN, as a bearer header or as the session cookie the
+      login form sets. The cookie holds an HMAC of the token, not the token.
+
+    With neither configured, every request is refused.
+    """
+
+    COOKIE = "axiom_app"
+
+    def __init__(
+        self,
+        *,
+        service_token: str = "",
+        team_domain: str = "",
+        aud: str = "",
+        allowed_emails: frozenset[str] = frozenset(),
+        jwks_client: "jwt.PyJWKClient | None" = None,
+    ):
+        self._service_token = service_token
+        self._aud = aud
+        self._issuer = team_domain.rstrip("/")
+        self._allowed_emails = allowed_emails
+        self._jwks = jwks_client
+        if self._jwks is None and self._issuer and aud:
+            self._jwks = jwt.PyJWKClient(f"{self._issuer}/cdn-cgi/access/certs")
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "AppAuth":
+        return cls(
+            service_token=settings.service_token,
+            team_domain=settings.cf_access_team_domain,
+            aud=settings.cf_access_aud,
+            allowed_emails=frozenset(
+                e.strip().lower() for e in settings.allowed_emails.split(",") if e.strip()
+            ),
+        )
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._service_token or self._jwks)
+
+    def session_value(self) -> str:
+        return hmac.new(
+            self._service_token.encode(), b"axiom-app-session", hashlib.sha256
+        ).hexdigest()
+
+    def check_token(self, token: str) -> bool:
+        return bool(self._service_token) and hmac.compare_digest(
+            token.encode(), self._service_token.encode()
+        )
+
+    async def identify(self, headers: Mapping[str, str], cookies: Mapping[str, str]) -> str | None:
+        """Who is asking, or None if nobody we accept."""
+        assertion = headers.get("cf-access-jwt-assertion")
+        if assertion and self._jwks is not None:
+            email = await asyncio.to_thread(self._verify_access, assertion)
+            if email:
+                return email
+        if self._service_token:
+            auth = headers.get("authorization", "")
+            if auth.lower().startswith("bearer ") and self.check_token(auth[7:].strip()):
+                return "service-token"
+            cookie = cookies.get(self.COOKIE, "")
+            if cookie and hmac.compare_digest(cookie, self.session_value()):
+                return "service-token"
+        return None
+
+    def _verify_access(self, assertion: str) -> str | None:
+        assert self._jwks is not None
+        try:
+            key = self._jwks.get_signing_key_from_jwt(assertion)
+            claims = jwt.decode(
+                assertion,
+                key.key,
+                algorithms=["RS256"],
+                audience=self._aud,
+                issuer=self._issuer,
+            )
+        except Exception as e:
+            logger.warning("Rejected Cloudflare Access token: %s", e)
+            return None
+        email = str(claims.get("email") or "").lower()
+        if email not in self._allowed_emails:
+            logger.warning("Rejected Access login for non-allowlisted email: %r", email)
+            return None
+        return email

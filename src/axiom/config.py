@@ -30,6 +30,29 @@ class Settings(BaseSettings):
     # `Authorization: Bearer <token>`.
     service_token: str = ""
 
+    # Cloudflare Access in front of the /app pages: the team domain (e.g.
+    # https://yourteam.cloudflareaccess.com) and the Access application's
+    # AUD tag. When both are set, /app accepts a valid Access JWT for an
+    # AXIOM_ALLOWED_EMAILS address; the service token works either way.
+    cf_access_team_domain: str = ""
+    cf_access_aud: str = ""
+
+    # The user's time zone (IANA name): decides what "today" means for tasks.
+    timezone: str = "UTC"
+
+    # Task rules for AI suggestions (see axiom.tasks).
+    suggestion_daily_limit: int = 3  # per rolling 24 hours
+    suggestion_ttl_days: int = 5  # unanswered suggestions expire after this
+    rejected_window_days: int = 30  # rejected suggestions block look-alikes this long
+    # A suggestion this similar to an open/suggested task or a recent rejection
+    # is refused: trigram similarity on titles, or title-embedding cosine.
+    task_similar_trigram: float = 0.5
+    # Calibrated on Gemini title embeddings: paraphrases (incl. zh/en) 0.87-0.93,
+    # different tasks of one project <= 0.81.
+    task_similar_semantic: float = 0.85
+    # Open tasks not updated for this long get asked "still doing this?".
+    stale_open_days: int = 14
+
     # HTTP transport.
     host: str = "127.0.0.1"
     port: int = 8080

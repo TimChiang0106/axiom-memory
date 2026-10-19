@@ -1,6 +1,7 @@
 """Domain models shared by the store, the MCP tools, and the exporter."""
 
-from datetime import datetime
+import json
+from datetime import date, datetime
 from typing import Literal
 
 import asyncpg
@@ -184,3 +185,73 @@ class ReviewReport(BaseModel):
     headless: list[MemorySummary] = []
     # Recurring episodic patterns; promotion candidates, not yet memories.
     recurring: list[EventCluster] = []
+
+
+TaskStatus = Literal["suggested", "open", "done", "dropped", "expired"]
+# stated: the user said it (open at once). ai_suggested: an AI proposed it
+# (lands as 'suggested' and waits for the user's confirm or reject).
+TaskSource = Literal["stated", "ai_suggested"]
+# The only reasons an AI may propose a task — each must cite memories.
+SuggestionTrigger = Literal["unrecorded_commitment", "due_soon", "overview_stale"]
+
+
+class TaskEvidence(BaseModel):
+    """Why a task exists: what prompted it and which memories back it."""
+
+    trigger: str | None = None
+    memories: list[str] = []
+    note: str | None = None
+
+
+class Task(BaseModel):
+    id: int
+    title: str
+    project: str | None = None
+    status: TaskStatus
+    source: TaskSource
+    due_date: date | None = None
+    planned_date: date | None = None
+    someday: bool = False
+    defer_count: int = 0
+    evidence: TaskEvidence | None = None
+    reject_reason: str | None = None
+    done_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime | None = None
+
+    @classmethod
+    def from_row(cls, row: asyncpg.Record) -> "Task":
+        data = {k: row[k] for k in cls.model_fields if k != "evidence"}
+        raw = row["evidence"]
+        data["evidence"] = TaskEvidence(**json.loads(raw)) if raw else None
+        return cls(**data)
+
+
+class DocumentSummary(BaseModel):
+    name: str
+    title: str
+    project: str | None = None
+    chars: int
+    updated_at: datetime
+
+
+class Document(BaseModel):
+    name: str
+    title: str
+    body: str
+    project: str | None = None
+    source_app: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentVersion(BaseModel):
+    """A past version of a document, as it read before an overwrite."""
+
+    title: str
+    body: str
+    project: str | None = None
+    source_app: str
+    written_at: datetime
+    superseded_at: datetime

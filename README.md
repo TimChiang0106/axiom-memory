@@ -52,6 +52,17 @@ mirror.
   patterns as candidates for promotion to a real memory, alongside
   near-duplicates, stale state, barely-used memories, drifted overviews, and
   orphaned project notes.
+- **Tasks, kept out of memory** — to-dos and deadlines live in a `task` list
+  with a planned day, a deadline, or "someday", not in overview prose. AI
+  suggestions are allowed but rationed server-side: each needs a fixed
+  trigger and cited memories, at most a few a day, look-alikes of open tasks
+  or recent rejections are refused, and unanswered ones expire.
+- **Documents** — long text (specs, plans, notes) goes in `document`:
+  fetched by name, versioned, never part of recall. A memory points at one
+  with `doc:<name>`.
+- **Work home page** — `/app` is a phone-first page over tasks and project
+  overviews: today's list, the week, and each project's progress. Memories
+  are read-only there. Guarded by Cloudflare Access and/or the service token.
 - **Measurable** — `axiom eval` scores recall (hit@k, MRR) against your own
   labelled queries, so ranking changes are tested instead of guessed.
 - **Graceful degradation** — no Gemini key, or the embedding API is slow?
@@ -78,7 +89,7 @@ Claude Code / Gemini CLI / any MCP client
 ```
 
 MCP tools: `remember`, `recall`, `get`, `forget`, `history`, `list_memories`,
-`log_event`, `review`.
+`log_event`, `review`, `task`, `document`.
 CLI: `axiom serve`, `axiom migrate`, `axiom export`, `axiom embed`,
 `axiom review`, `axiom eval`.
 
@@ -153,6 +164,8 @@ forwards `/.well-known/*`, `/authorize`, `/token`, `/register` and
 | `AXIOM_ALLOWED_EMAILS` | Comma-separated allowlist for Google login |
 | `AXIOM_SERVICE_TOKEN` | Static bearer token for headless callers |
 | `AXIOM_GEMINI_API_KEY` | Enables semantic recall (768-dim Gemini embeddings); empty = lexical-only |
+| `AXIOM_TIMEZONE` | IANA time zone that decides what "today" is for tasks (default `UTC`) |
+| `AXIOM_CF_ACCESS_TEAM_DOMAIN` / `AXIOM_CF_ACCESS_AUD` | Cloudflare Access team domain and application AUD tag guarding `/app` (see below) |
 | `POSTGRES_PASSWORD` | Database password (compose) |
 | `AXIOM_BACKUP_GCS_URI` / `AXIOM_BACKUP_GCS_CREDENTIALS` | Optional off-machine copy of each backup (see Backups) |
 
@@ -163,6 +176,22 @@ on an existing database, run `axiom embed` once to backfill vectors.
 Ranking and review thresholds (lexical/semantic weights, decay half-lives,
 truncation length, and so on) have defaults in `src/axiom/config.py`; each can
 be overridden with an `AXIOM_`-prefixed environment variable.
+
+### The `/app` pages
+
+`<base_url>/app` shows today's tasks, the week, and per-project progress. It
+reads every memory, so it refuses all requests unless one of these holds:
+
+- A valid **Cloudflare Access** JWT for an `AXIOM_ALLOWED_EMAILS` address
+  (set `AXIOM_CF_ACCESS_TEAM_DOMAIN` and `AXIOM_CF_ACCESS_AUD`). Recommended.
+- The **service token**, as a bearer header or entered once on `/app/login`
+  (sets an HttpOnly cookie holding an HMAC of the token).
+
+To put Access in front: Zero Trust → Access → Applications → Add → Self-hosted;
+domain = your hostname with **path `app`** (scope it to the path — Access on the
+whole hostname would block the MCP clients' OAuth flow); add an Allow policy
+for your email; copy the application's AUD tag into `AXIOM_CF_ACCESS_AUD`, and
+set `AXIOM_CF_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com`.
 
 ### Backups
 
