@@ -3,27 +3,31 @@
 The home page exists to answer one question — "is everything taken care
 of?" — so it leads with a one-line status (how many today, how many already
 arranged for later, how many still need a day) and then lists only what
-needs a look now. Memories are shown read-only; the only writes the pages
-make are task actions.
+needs a look now. Tasks can be added, edited, finished and undone here;
+memories and documents are shown read-only.
 
 Server-rendered HTML with plain forms (POST, then redirect back): no build
-step, no client state, works on any phone browser.
+step, no client state, works on any phone browser. A manifest and icon let
+the page be added to a phone's home screen.
 """
 
+import json
 import re
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from html import escape
-from urllib.parse import quote, urlparse
+from pathlib import Path
+from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from axiom.auth import AppAuth
+from axiom.documents import DocumentStore
 from axiom.models import Memory, Task
 from axiom.store import MemoryStore
-from axiom.tasks import TaskError, TaskStore, later_this_week
+from axiom.tasks import ProjectStats, TaskError, TaskStore, later_this_week
 
 WEEKDAYS = "一二三四五六日"
 TRIGGER_LABELS = {
@@ -31,7 +35,39 @@ TRIGGER_LABELS = {
     "due_soon": "截止日將近",
     "overview_stale": "專案總覽落後",
 }
+STATUS_LABELS = {
+    "open": "進行中",
+    "done": "已完成",
+    "dropped": "已刪除",
+    "suggested": "AI 建議",
+    "expired": "已失效",
+}
 OPEN_WARN = 5
+# Path segment standing for "no project" in /app/projects/<name>.
+NO_PROJECT = "-"
+
+_STATIC = Path(__file__).parent / "static"
+_ICONS = {size: (_STATIC / f"icon-{size}.png").read_bytes() for size in (180, 512)}
+_MANIFEST = json.dumps(
+    {
+        "name": "Axiom",
+        "short_name": "Axiom",
+        "start_url": "/app",
+        "scope": "/app",
+        "display": "standalone",
+        "background_color": "#FFFFFF",
+        "theme_color": "#FFFFFF",
+        "icons": [
+            {"src": "/app/icon-180.png", "sizes": "180x180", "type": "image/png"},
+            {
+                "src": "/app/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+        ],
+    }
+)
 
 _CSS = """
 :root{color-scheme:light;
@@ -44,21 +80,24 @@ html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font-size:16px;line-height:1.6;
 font-family:"DM Sans","Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
 font-variant-numeric:tabular-nums}
-header{position:sticky;top:0;z-index:1;background:var(--bg);border-bottom:1px solid var(--line)}
+header{position:sticky;top:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--line);
+padding-top:env(safe-area-inset-top)}
 .bar{max-width:720px;margin:0 auto;padding:0 16px;height:56px;display:flex;align-items:center;
 gap:4px}
 .brand{font-weight:700;margin-right:auto}
-nav{display:flex;gap:4px}
-nav a{padding:6px 12px;border-radius:var(--r-ctl);color:var(--dim);text-decoration:none;
+nav{display:flex;gap:2px}
+nav a{padding:6px 10px;border-radius:var(--r-ctl);color:var(--dim);text-decoration:none;
 transition:background-color .15s}
 nav a:hover{background:var(--selected)}
 nav a.on{background:var(--selected);color:var(--fg);font-weight:600}
-main{max-width:720px;margin:0 auto;padding:0 16px 64px}
+main{max-width:720px;margin:0 auto;padding:0 16px calc(96px + env(safe-area-inset-bottom))}
 a{color:var(--fg);text-decoration:underline;text-decoration-color:var(--input);
 text-underline-offset:3px}
 h1{font-size:22px;font-weight:700;line-height:1.4;margin:24px 0 4px}
 h2{display:flex;gap:8px;font-size:14px;font-weight:600;color:var(--dim);margin:28px 4px 8px}
 h2 .count{font-weight:400}
+.back{display:inline-block;margin-top:16px;font-size:14px;color:var(--dim);text-decoration:none}
+.back:hover{color:var(--fg)}
 .summary{margin:24px 4px 0}
 .summary .main{font-size:22px;font-weight:700;line-height:1.4}
 .summary .sub{color:var(--dim)}
@@ -67,15 +106,24 @@ h2 .count{font-weight:400}
 overflow:hidden;margin-bottom:12px}
 .row{padding:14px 16px}
 .row+.row{border-top:1px solid var(--line)}
+a.row{display:block;color:inherit;text-decoration:none;transition:background-color .15s}
+a.row:hover{background:var(--selected)}
 .title{font-weight:600}
+.title a{color:inherit;text-decoration:none}
 .meta{font-size:14px;color:var(--dim);margin-top:2px}
 .flag{font-size:14px;color:var(--warn);margin-top:4px}
 .bad{color:var(--bad)}
 .tag{display:inline-block;font-size:12px;padding:0 6px;border-radius:var(--r-tag);
 background:var(--selected);color:var(--dim)}
-.actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
-.actions form{margin:0}
-.days .end{margin-left:auto}
+.actions,.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.actions{margin-top:12px}
+.actions.flush,.row.flush .metrics{margin-top:0}
+.grow{flex:1;min-width:0}
+.meta.grow{margin-top:0}
+.foot{margin-top:16px}
+.add{margin-top:20px}
+.tools{margin:0 0 8px}
+.actions form,.tools form{margin:0}
 button,.more summary{appearance:none;display:inline-flex;align-items:center;min-height:36px;
 padding:0 14px;font:inherit;font-size:14px;line-height:1;color:var(--fg);background:var(--surface);
 border:1px solid var(--line);border-radius:var(--r-ctl);cursor:pointer;
@@ -86,26 +134,61 @@ font-weight:600}
 button.primary:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
 button.quiet{background:transparent;border-color:transparent;color:var(--dim)}
 button.quiet:hover{background:transparent;color:var(--bad)}
-button:focus-visible,.more summary:focus-visible,input:focus-visible,a:focus-visible{
-outline:2px solid var(--fg);outline-offset:2px}
+button:focus-visible,.more summary:focus-visible,input:focus-visible,select:focus-visible,
+a:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
 .more summary{list-style:none}
 .more summary::-webkit-details-marker{display:none}
 .more[open]{flex-basis:100%}
 .more[open] summary{background:var(--selected);font-weight:600}
 .more .days{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
-input[type=text],input[type=password]{min-height:40px;padding:0 12px;font:inherit;font-size:16px;
-color:var(--fg);background:var(--surface);border:1px solid var(--input);border-radius:var(--r-ctl)}
+.days .end{margin-left:auto}
+input[type=text],input[type=password],input[type=search],input[type=date],select{
+min-height:40px;padding:0 12px;font:inherit;font-size:16px;color:var(--fg);
+background:var(--surface);border:1px solid var(--input);border-radius:var(--r-ctl)}
+input[type=date]{min-width:0}
+.wide{width:100%}
 .reject{display:flex;gap:8px;flex:1;min-width:220px}
 .reject input{flex:1;min-width:0;min-height:36px;font-size:14px}
+.seg{display:flex;flex-wrap:wrap;gap:8px}
+.seg label{position:relative}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg span{display:inline-flex;align-items:center;min-height:36px;padding:0 14px;font-size:14px;
+border:1px solid var(--line);border-radius:var(--r-ctl);cursor:pointer;
+transition:background-color .15s,border-color .15s}
+.seg input:checked+span{background:var(--selected);border-color:var(--fg);font-weight:600}
+.seg input:focus-visible+span{outline:2px solid var(--fg);outline-offset:2px}
+.addopts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
+.addopts select{min-height:36px;font-size:14px}
+.addopts button{margin-left:auto}
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field{display:flex;flex-direction:column;gap:4px;font-size:14px;color:var(--dim)}
+.field.full{grid-column:1/-1}
+.field input,.field select{width:100%;min-width:0}
+.fields>*{min-width:0}
+.search{display:flex;gap:8px;margin-top:16px}
+.search input{flex:1;min-width:0}
 .empty{color:var(--dim);padding:14px 16px}
 .err{margin:16px 0 0;padding:10px 14px;font-size:14px;color:var(--bad);background:var(--surface);
 border:1px solid currentColor;border-radius:var(--r-ctl)}
+.notice{position:fixed;z-index:3;left:16px;right:16px;
+bottom:calc(16px + env(safe-area-inset-bottom));
+max-width:688px;margin:0 auto;display:flex;align-items:center;gap:12px;
+padding:6px 6px 6px 16px;font-size:14px;color:var(--on-primary);background:var(--primary);
+border-radius:var(--r-ctl)}
+.notice span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.notice form{margin:0}
+.notice button{background:transparent;border-color:transparent;color:var(--on-primary);
+font-weight:600}
+.notice button:hover{background:var(--primary-hover)}
 .day{display:grid;grid-template-columns:96px 1fr;gap:12px}
 .day .d{font-size:14px;color:var(--dim);padding-top:1px}
 .day.today{background:var(--selected)}
 .day.today .d{color:var(--fg);font-weight:600}
 .day .t+.t{margin-top:4px}
+.day .t a{color:inherit;text-decoration:none}
 .done{text-decoration:line-through;color:var(--dim)}
+.weeknav{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.weeknav a{font-size:14px;color:var(--dim);text-decoration:none;white-space:nowrap}
 .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
 .metrics .n{display:block;font-size:20px;font-weight:700;line-height:1.3}
 .metrics .l{font-size:13px;color:var(--dim)}
@@ -113,12 +196,13 @@ details.ov{margin-top:12px}
 details.ov summary{cursor:pointer;color:var(--dim);font-size:14px}
 .body{white-space:pre-wrap;font-size:15px;margin-top:8px}
 .row>.body:first-child{margin-top:0}
+details.ov .body{padding-top:12px;border-top:1px solid var(--line)}
 .tags{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0 16px;font-size:14px;
 color:var(--dim)}
-details.ov .body{padding-top:12px;border-top:1px solid var(--line)}
 .login{max-width:360px;margin:15vh auto 0}
 .login form{display:flex;flex-direction:column;gap:12px;margin-top:16px}
 .login button{justify-content:center;min-height:40px}
+@media (max-width:380px){nav a{padding:6px 8px}.fields{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 """
 _FONTS = "https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&display=swap"
@@ -129,6 +213,7 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
         ("today", "/app", "今天"),
         ("week", "/app/week", "本週"),
         ("projects", "/app/projects", "專案"),
+        ("library", "/app/library", "資料"),
     ]
     nav = "".join(
         f'<a href="{href}"{" class=on aria-current=page" if key == active else ""}>{label}</a>'
@@ -136,9 +221,15 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
     )
     return HTMLResponse(
         "<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
         "<meta name='robots' content='noindex'>"
         "<meta name='theme-color' content='#FFFFFF'>"
+        "<meta name='mobile-web-app-capable' content='yes'>"
+        "<meta name='apple-mobile-web-app-capable' content='yes'>"
+        "<meta name='apple-mobile-web-app-title' content='Axiom'>"
+        "<link rel='manifest' href='/app/manifest.webmanifest' crossorigin='use-credentials'>"
+        "<link rel='icon' href='/app/icon-180.png'>"
+        "<link rel='apple-touch-icon' href='/app/icon-180.png'>"
         f"<title>{escape(title)} · Axiom</title>"
         f"<link rel='stylesheet' href='{_FONTS}'><style>{_CSS}</style></head>"
         f"<body><header><div class='bar'><span class='brand'>Axiom</span><nav>{nav}</nav>"
@@ -155,7 +246,22 @@ def _day(d: date, today: date | None = None) -> str:
     return f"{d.month}/{d.day}（{WEEKDAYS[d.weekday()]}）"
 
 
-def _meta(task: Task, today: date) -> str:
+def _with(url: str, **params: str | int) -> str:
+    """`url` with its query replaced by `params` — so a stale error or undo
+    notice never follows the user back to the page."""
+    path = url.split("?", 1)[0]
+    return f"{path}?{urlencode(params)}" if params else path
+
+
+def _task_url(task: Task, back: str) -> str:
+    return f"/app/tasks/{task.id}?{urlencode({'from': back})}"
+
+
+def _project_url(project: str | None) -> str:
+    return f"/app/projects/{quote(project or NO_PROJECT)}"
+
+
+def _meta_text(task: Task, today: date) -> str:
     parts = []
     if task.project:
         parts.append(escape(task.project))
@@ -164,10 +270,15 @@ def _meta(task: Task, today: date) -> str:
     elif task.someday:
         parts.append("之後再說")
     if task.due_date:
-        overdue = task.due_date < today
+        overdue = task.due_date < today and task.status == "open"
         label = f"截止 {_day(task.due_date, today)}"
         parts.append(f'<span class="bad">{label}</span>' if overdue else label)
-    return f'<div class="meta">{"・".join(parts)}</div>' if parts else ""
+    return "・".join(parts)
+
+
+def _meta(task: Task, today: date) -> str:
+    text = _meta_text(task, today)
+    return f'<div class="meta">{text}</div>' if text else ""
 
 
 def _button(
@@ -184,8 +295,29 @@ def _button(
     end = ' class="end"' if action == "drop" else ""
     return (
         f'<form method="post" action="/app/tasks/{task_id}/{action}"{end}{onsubmit}>'
-        f'<input type="hidden" name="next" value="{back}">{extra}'
+        f'<input type="hidden" name="next" value="{escape(back)}">{extra}'
         f'<button class="{cls}">{label}</button></form>'
+    )
+
+
+def _defer(task_id: int, label: str, to: str, *, back: str) -> str:
+    return _button(
+        task_id, "defer", label, back=back, extra=f'<input type="hidden" name="to" value="{to}">'
+    )
+
+
+def _task_actions(task: Task, today: date, *, back: str) -> str:
+    days = "".join(
+        _defer(task.id, _day(d), d.isoformat(), back=back) for d in later_this_week(today)
+    )
+    return (
+        _button(task.id, "done", "完成", back=back, cls="primary")
+        + _defer(task.id, "明天", "tomorrow", back=back)
+        + _defer(task.id, "之後再說", "someday", back=back)
+        + '<details class="more"><summary>更多</summary><div class="days">'
+        + days
+        + _button(task.id, "drop", "刪除", back=back, cls="quiet", confirm="刪除這件事？")
+        + "</div></details>"
     )
 
 
@@ -193,44 +325,23 @@ def _task_card(task: Task, today: date, *, back: str = "/app") -> str:
     flags = ""
     if task.defer_count >= 3:
         flags += f'<div class="flag">延了 {task.defer_count} 次，還要做嗎？</div>'
-    days = "".join(
-        _button(
-            task.id,
-            "defer",
-            _day(d),
-            back=back,
-            extra=f'<input type="hidden" name="to" value="{d.isoformat()}">',
-        )
-        for d in later_this_week(today)
-    )
-    actions = (
-        _button(task.id, "done", "完成", back=back, cls="primary")
-        + _button(
-            task.id,
-            "defer",
-            "明天",
-            back=back,
-            extra='<input type="hidden" name="to" value="tomorrow">',
-        )
-        + _button(
-            task.id,
-            "defer",
-            "之後再說",
-            back=back,
-            extra='<input type="hidden" name="to" value="someday">',
-        )
-        + '<details class="more"><summary>更多</summary><div class="days">'
-        + days
-        + _button(task.id, "drop", "刪除", back=back, cls="quiet", confirm="刪除這件事？")
-        + "</div></details>"
-    )
     return (
-        f'<div class="row"><div class="title">{escape(task.title)}</div>'
-        f'{_meta(task, today)}{flags}<div class="actions">{actions}</div></div>'
+        f'<div class="row"><div class="title"><a href="{escape(_task_url(task, back))}">'
+        f"{escape(task.title)}</a></div>{_meta(task, today)}{flags}"
+        f'<div class="actions">{_task_actions(task, today, back=back)}</div></div>'
     )
 
 
-def _suggestion_card(task: Task, today: date) -> str:
+def _done_card(task: Task, *, back: str) -> str:
+    return (
+        '<div class="row"><div class="actions flush">'
+        f'<a class="done grow" href="{escape(_task_url(task, back))}">'
+        f"{escape(task.title)}</a>"
+        f"{_button(task.id, 'reopen', '復原', back=back, cls='quiet')}</div></div>"
+    )
+
+
+def _suggestion_card(task: Task, today: date, *, back: str = "/app") -> str:
     ev = task.evidence
     lines = []
     if ev and ev.trigger:
@@ -245,28 +356,82 @@ def _suggestion_card(task: Task, today: date) -> str:
     evidence = "".join(f'<div class="meta">{line}</div>' for line in lines)
     reject = (
         f'<form method="post" action="/app/tasks/{task.id}/reject" class="reject">'
-        '<input type="hidden" name="next" value="/app">'
-        '<input type="text" name="reason" placeholder="拒絕原因（選填）">'
+        f'<input type="hidden" name="next" value="{escape(back)}">'
+        '<input type="text" name="reason" placeholder="拒絕原因（選填）" aria-label="拒絕原因">'
         "<button>拒絕</button></form>"
     )
     return (
         f'<div class="row"><div class="title">{escape(task.title)}</div>'
         f'{_meta(task, today)}{evidence}<div class="actions">'
-        f"{_button(task.id, 'confirm', '確認', back='/app', cls='primary')}{reject}</div></div>"
+        f"{_button(task.id, 'confirm', '確認', back=back, cls='primary')}{reject}</div></div>"
     )
 
 
-def _section(title: str, cards: list[str], *, empty: str | None = None) -> str:
+def _section(
+    title: str,
+    cards: list[str],
+    *,
+    empty: str | None = None,
+    tools: str = "",
+    counted: bool = True,
+) -> str:
     if not cards and empty is None:
         return ""
     inner = "".join(cards) if cards else f'<div class="empty">{empty}</div>'
-    count = f'<span class="count">{len(cards)}</span>' if cards else ""
-    return f'<section><h2>{title}{count}</h2><div class="list">{inner}</div></section>'
+    count = f'<span class="count">{len(cards)}</span>' if cards and counted else ""
+    return f'<section><h2>{title}{count}</h2>{tools}<div class="list">{inner}</div></section>'
+
+
+def _project_options(projects: list[str], selected: str | None, *, none_label: str) -> str:
+    options = [f'<option value="">{none_label}</option>']
+    for p in projects:
+        sel = " selected" if p == selected else ""
+        options.append(f'<option value="{escape(p)}"{sel}>{escape(p)}</option>')
+    return "".join(options)
+
+
+def _quick_add(projects: list[str]) -> str:
+    whens = [("today", "今天"), ("tomorrow", "明天"), ("someday", "之後"), ("none", "不排日期")]
+    seg = "".join(
+        f'<label><input type="radio" name="when" value="{v}"{" checked" if v == "today" else ""}>'
+        f"<span>{label}</span></label>"
+        for v, label in whens
+    )
+    project = (
+        f'<select name="project" aria-label="專案">'
+        f"{_project_options(projects, None, none_label='不分專案')}</select>"
+        if projects
+        else ""
+    )
+    return (
+        '<form method="post" action="/app/tasks/new" class="list add">'
+        '<div class="row"><input class="wide" type="text" name="title" required '
+        'placeholder="新增一件事" aria-label="新增一件事" autocomplete="off" enterkeyhint="done">'
+        f'<div class="addopts"><div class="seg">{seg}</div>{project}'
+        '<button class="primary">新增</button></div></div></form>'
+    )
+
+
+def _metrics(s: ProjectStats | None) -> str:
+    return (
+        '<div class="metrics">'
+        + "".join(
+            f'<div><span class="n">{n}</span><span class="l">{label}</span></div>'
+            for n, label in (
+                (s.open if s else 0, "進行中"),
+                (s.done_this_week if s else 0, "本週完成"),
+                (s.done_total if s else 0, "總完成"),
+            )
+        )
+        + "</div>"
+    )
 
 
 def _inline_md(text: str) -> str:
-    """Escape, then render **bold** — enough for overview memories."""
-    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escape(text))
+    """Escape, then render **bold** and link `doc:<name>` references —
+    enough for overview memories and plain-text documents."""
+    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escape(text))
+    return re.sub(r"\bdoc:([\w.-]+)", r'<a href="/app/docs/\1">doc:\1</a>', html)
 
 
 def build_routes(
@@ -274,6 +439,7 @@ def build_routes(
     auth: AppAuth,
     get_tasks: Callable[[], Awaitable[TaskStore]],
     get_memories: Callable[[], Awaitable[MemoryStore]],
+    get_documents: Callable[[], Awaitable[DocumentStore]],
 ) -> list[Route]:
     async def guard(request: Request) -> Response | None:
         if not auth.configured:
@@ -294,6 +460,32 @@ def build_routes(
             return value
         return "/app"
 
+    def here(request: Request) -> str:
+        """The current page, minus one-shot notices, to come back to after a form."""
+        params = {k: v for k, v in request.query_params.items() if k not in ("error", "undo")}
+        return _with(request.url.path, **params)
+
+    async def notices(request: Request, tasks: TaskStore) -> str:
+        """The error banner and the undo bar a redirect asked for."""
+        html = ""
+        if error := request.query_params.get("error"):
+            html += f'<div class="err">{escape(error)}</div>'
+        undo = request.query_params.get("undo", "")
+        if undo.isdigit() and (task := await tasks.get(int(undo))) is not None:
+            verb = {"done": "已完成", "dropped": "已刪除"}.get(task.status)
+            if verb:
+                html += (
+                    f'<div class="notice" role="status"><span>{verb}「{escape(task.title)}」</span>'
+                    f"{_button(task.id, 'reopen', '復原', back=here(request))}</div>"
+                )
+        return html
+
+    def redirect(back: str, **params: str | int) -> RedirectResponse:
+        if not params:
+            return RedirectResponse(back, status_code=303)
+        keep = {k: v for k, v in parse_qsl(urlparse(back).query) if k not in ("error", "undo")}
+        return RedirectResponse(_with(back, **keep, **params), status_code=303)
+
     async def today_page(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
             return denied
@@ -307,11 +499,21 @@ def build_routes(
         )
         if view.unscheduled:
             status += f'<div class="todo">{len(view.unscheduled)} 件還沒安排</div>'
-        error = request.query_params.get("error")
         body = f'<div class="summary">{status}</div>'
-        if error:
-            body += f'<div class="err">{escape(error)}</div>'
-        body += _section("逾期", [_task_card(t, today) for t in view.overdue])
+        body += await notices(request, tasks)
+        body += _quick_add(await tasks.known_projects())
+        bulk = ""
+        if len(view.overdue) >= 2:
+            bulk = (
+                '<div class="tools">'
+                + "".join(
+                    '<form method="post" action="/app/tasks/bulk">'
+                    f'<input type="hidden" name="to" value="{to}"><button>{label}</button></form>'
+                    for to, label in (("today", "全部移到今天"), ("someday", "全部改到之後"))
+                )
+                + "</div>"
+            )
+        body += _section("逾期", [_task_card(t, today) for t in view.overdue], tools=bulk)
         body += _section("今天", [_task_card(t, today) for t in view.due_today])
         body += _section(
             "還沒安排",
@@ -321,6 +523,9 @@ def build_routes(
         body += _section("AI 建議待確認", [_suggestion_card(t, today) for t in view.suggested])
         if not (view.overdue or view.due_today or view.unscheduled or view.suggested):
             body += '<div class="list"><div class="empty">今天沒有要處理的事。</div></div>'
+        body += _section(
+            "今天已完成", [_done_card(t, back="/app") for t in await tasks.done_today()]
+        )
         return _page("今天", "today", body)
 
     async def week_page(request: Request) -> Response:
@@ -328,13 +533,19 @@ def build_routes(
             return denied
         tasks = await get_tasks()
         today = await tasks.today()
-        view = await tasks.week_view(today)
+        try:
+            day = date.fromisoformat(request.query_params.get("d", ""))
+        except ValueError:
+            day = today
+        view = await tasks.week_view(day)
+        back = here(request)
         cols = []
         for i, day_tasks in enumerate(view.days):
             d = view.monday + timedelta(days=i)
             items = (
                 "".join(
-                    f'<div class="t{" done" if t.status == "done" else ""}">{escape(t.title)}</div>'
+                    f'<div class="t{" done" if t.status == "done" else ""}">'
+                    f'<a href="{escape(_task_url(t, back))}">{escape(t.title)}</a></div>'
                     for t in day_tasks
                 )
                 or '<div class="t meta">—</div>'
@@ -344,7 +555,14 @@ def build_routes(
                 f'<div class="{cls}"><div class="d">週{WEEKDAYS[i]} {d.month}/{d.day}</div>'
                 f"<div>{items}</div></div>"
             )
-        body = f"<h1>{_day(view.monday)} – {_day(view.monday + timedelta(days=6))}</h1>"
+        prev_week = (view.monday - timedelta(days=7)).isoformat()
+        next_week = (view.monday + timedelta(days=7)).isoformat()
+        body = (
+            f'<div class="weeknav"><a href="/app/week?d={prev_week}">‹ 上週</a>'
+            f"<h1>{_day(view.monday)} – {_day(view.monday + timedelta(days=6))}</h1>"
+            f'<a href="/app/week?d={next_week}">下週 ›</a></div>'
+        )
+        body += await notices(request, tasks)
         body += f'<div class="list">{"".join(cols)}</div>'
         groups: dict[str, list[Task]] = {}
         for t in view.done:
@@ -356,7 +574,7 @@ def build_routes(
             + "</div>"
             for project, items in groups.items()
         ]
-        body += _section("本週已完成", rows, empty="還沒有。")
+        body += _section("這週已完成", rows, empty="還沒有。")
         return _page("本週", "week", body)
 
     async def projects_page(request: Request) -> Response:
@@ -373,14 +591,6 @@ def build_routes(
         def card(project: str | None, overview: Memory | None) -> str:
             s = stats.get(project)
             name = project or "未分專案"
-            metrics = "".join(
-                f'<div><span class="n">{n}</span><span class="l">{label}</span></div>'
-                for n, label in (
-                    (s.open if s else 0, "進行中"),
-                    (s.done_this_week if s else 0, "本週完成"),
-                    (s.done_total if s else 0, "總完成"),
-                )
-            )
             due = (
                 f'<div class="meta">最近截止 {_day(s.next_due, today)}</div>'
                 if s and s.next_due
@@ -410,16 +620,10 @@ def build_routes(
                         f'<div class="flag">「{escape(t.title)}」{tasks.stale_open_days} '
                         "天沒動，還要做嗎？</div>"
                     )
-            body = ""
-            if overview:
-                body = (
-                    '<details class="ov">'
-                    f"<summary>總覽（{overview.updated_at:%Y-%m-%d} 更新）</summary>"
-                    f'<div class="body">{_inline_md(overview.content)}</div></details>'
-                )
             return (
-                f'<div class="list"><div class="row"><div class="title">{escape(name)}</div>'
-                f'{due}<div class="metrics">{metrics}</div>{flags}{body}</div></div>'
+                f'<div class="list"><div class="row"><div class="title">'
+                f'<a href="{_project_url(project)}">{escape(name)} ›</a></div>'
+                f"{due}{_metrics(s)}{flags}</div></div>"
             )
 
         known = {o.name.removesuffix("-overview") for o in overviews}
@@ -437,20 +641,132 @@ def build_routes(
         )
         return _page("專案", "projects", body)
 
+    async def project_page(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        tasks = await get_tasks()
+        memories = await get_memories()
+        documents = await get_documents()
+        raw = request.path_params["name"]
+        project = None if raw == NO_PROJECT else raw
+        today = await tasks.today()
+        stats = await tasks.project_stats()
+        overview = await memories.get(f"{project}-overview") if project else None
+        if project and overview is None and project not in stats:
+            return _page("找不到", "projects", '<div class="empty">找不到這個專案。</div>')
+        back = here(request)
+
+        found = await tasks.find(project=project, statuses=["open", "suggested", "done"])
+        if project is None:
+            found = [t for t in found if t.project is None]
+        open_ = [t for t in found if t.status == "open"]
+        suggested = [t for t in found if t.status == "suggested"]
+        done = sorted(
+            (t for t in found if t.status == "done"),
+            key=lambda t: t.done_at or t.updated_at,
+            reverse=True,
+        )[:10]
+        body = '<a class="back" href="/app/projects">‹ 專案</a>'
+        body += f"<h1>{escape(project or '未分專案')}</h1>"
+        body += await notices(request, tasks)
+        body += (
+            f'<div class="list"><div class="row flush">{_metrics(stats.get(project))}</div></div>'
+        )
+        body += _section(
+            "進行中", [_task_card(t, today, back=back) for t in open_], empty="沒有進行中的事。"
+        )
+        body += _section(
+            "AI 建議待確認", [_suggestion_card(t, today, back=back) for t in suggested]
+        )
+        body += _section("最近完成", [_done_card(t, back=back) for t in done])
+        if overview:
+            body += _section(
+                "總覽",
+                [
+                    f'<div class="row"><div class="body">{_inline_md(overview.content)}</div>'
+                    f'<div class="meta foot">'
+                    f'<a href="/app/memory/{escape(overview.name)}">{escape(overview.name)}</a>'
+                    f"・{overview.updated_at:%Y-%m-%d} 更新</div></div>"
+                ],
+                counted=False,
+            )
+        if project:
+            docs = await documents.list_all(project=project)
+            body += _section(
+                "文件",
+                [
+                    f'<a class="row" href="/app/docs/{escape(d.name)}"><div class="title">'
+                    f'{escape(d.title)}</div><div class="meta">{d.chars} 字・'
+                    f"{d.updated_at:%Y-%m-%d} 更新</div></a>"
+                    for d in docs
+                ],
+            )
+        return _page(project or "未分專案", "projects", body)
+
+    async def library_page(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        memories = await get_memories()
+        documents = await get_documents()
+        q = request.query_params.get("q", "").strip()
+        body = (
+            "<h1>資料</h1>"
+            '<form class="search" method="get" action="/app/library">'
+            f'<input type="search" name="q" value="{escape(q)}" placeholder="搜尋記憶" '
+            'aria-label="搜尋記憶" enterkeyhint="search">'
+            '<button class="primary">搜尋</button></form>'
+        )
+
+        def memory_row(name: str, description: str, kind: str) -> str:
+            return (
+                f'<a class="row" href="/app/memory/{escape(name)}"><div class="title">'
+                f'{escape(name)}</div><div class="meta">{escape(description)}</div>'
+                f'<div class="meta"><span class="tag">{kind}</span></div></a>'
+            )
+
+        if q:
+            found = await memories.recall(q, limit=20, track_usage=False)
+            body += _section(
+                "搜尋結果",
+                [memory_row(m.name, m.description, m.type) for m in found],
+                empty="沒有符合的記憶。",
+            )
+            return _page(f"搜尋 {q}", "library", body)
+        docs = await documents.list_all()
+        body += _section(
+            "文件",
+            [
+                f'<a class="row" href="/app/docs/{escape(d.name)}"><div class="title">'
+                f'{escape(d.title)}</div><div class="meta">'
+                f"{escape(d.project) + '・' if d.project else ''}"
+                f"{d.chars} 字・{d.updated_at:%Y-%m-%d} 更新</div></a>"
+                for d in docs
+            ],
+            empty="還沒有文件。",
+        )
+        recent = (await memories.list_all())[:20]
+        body += _section(
+            "最近更新的記憶", [memory_row(m.name, m.description, m.type) for m in recent]
+        )
+        return _page("資料", "library", body)
+
     async def memory_page(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
             return denied
         memories = await get_memories()
         memory = await memories.get(request.path_params["name"])
+        back = '<a class="back" href="/app/library">‹ 資料</a>'
         if memory is None:
             return _page(
-                "找不到", "", '<div class="list"><div class="empty">找不到這筆記憶。</div></div>'
+                "找不到",
+                "library",
+                back + '<div class="list"><div class="empty">找不到這筆記憶。</div></div>',
             )
         related = "、".join(
             f'<a href="/app/memory/{escape(n)}">{escape(n)}</a>' for n in memory.related
         )
         body = (
-            f"<h1>{escape(memory.name)}</h1>"
+            f"{back}<h1>{escape(memory.name)}</h1>"
             f'<div class="meta">{escape(memory.description)}</div>'
             f'<div class="tags"><span class="tag">{memory.type}</span>'
             f'<span class="tag">{memory.category}</span>'
@@ -460,7 +776,133 @@ def build_routes(
             + (f'<div class="row meta">相關：{related}</div>' if related else "")
             + "</div>"
         )
-        return _page(memory.name, "", body)
+        return _page(memory.name, "library", body)
+
+    async def document_page(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        documents = await get_documents()
+        doc = await documents.get(request.path_params["name"])
+        back = '<a class="back" href="/app/library">‹ 資料</a>'
+        if doc is None:
+            return _page(
+                "找不到",
+                "library",
+                back + '<div class="list"><div class="empty">找不到這份文件。</div></div>',
+            )
+        project = (
+            f'<a class="tag" href="{_project_url(doc.project)}">{escape(doc.project)}</a>'
+            if doc.project
+            else ""
+        )
+        body = (
+            f"{back}<h1>{escape(doc.title)}</h1>"
+            f'<div class="tags">{project}<span>{escape(doc.name)}</span>'
+            f"<span>{len(doc.body)} 字・{doc.updated_at:%Y-%m-%d} 更新</span></div>"
+            f'<div class="list"><div class="row"><div class="body">{_inline_md(doc.body)}'
+            "</div></div></div>"
+        )
+        return _page(doc.title, "library", body)
+
+    async def task_page(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        tasks = await get_tasks()
+        task = await tasks.get(int(request.path_params["task_id"]))
+        back = back_to(request.query_params.get("from"))
+        top = f'<a class="back" href="{escape(back)}">‹ 返回</a>'
+        if task is None:
+            return _page("找不到", "", top + '<div class="empty">找不到這件事。</div>')
+        today = await tasks.today()
+        projects = await tasks.known_projects()
+        body = (
+            f"{top}<h1>{escape(task.title)}</h1>"
+            f'<div class="tags"><span class="tag">{STATUS_LABELS.get(task.status, task.status)}'
+            f"</span><span>{_meta_text(task, today)}</span></div>"
+        )
+        body += await notices(request, tasks)
+        if task.status == "open":
+            body += (
+                f'<div class="list"><div class="row"><div class="actions flush">'
+                f"{_task_actions(task, today, back=back)}</div></div></div>"
+            )
+        elif task.status == "suggested":
+            body += f'<div class="list">{_suggestion_card(task, today, back=back)}</div>'
+        elif task.status in ("done", "dropped"):
+            when = f"{task.done_at:%Y-%m-%d} 完成・" if task.done_at else ""
+            body += (
+                f'<div class="list"><div class="row"><div class="actions flush">'
+                f'<span class="meta grow">{when}可以改回進行中</span>'
+                f"{_button(task.id, 'reopen', '復原', back=here(request))}</div></div></div>"
+            )
+        if task.status in ("open", "suggested"):
+
+            def date_value(d: date | None) -> str:
+                return d.isoformat() if d else ""
+
+            body += (
+                "<h2>編輯</h2>"
+                f'<form method="post" action="/app/tasks/{task.id}/edit" class="list">'
+                f'<input type="hidden" name="next" value="{escape(here(request))}">'
+                '<div class="row"><div class="fields">'
+                '<label class="field full">標題<input type="text" name="title" required '
+                f'value="{escape(task.title)}"></label>'
+                '<label class="field">計畫日期<input type="date" name="planned_date" '
+                f'value="{date_value(task.planned_date)}"></label>'
+                '<label class="field">截止日<input type="date" name="due_date" '
+                f'value="{date_value(task.due_date)}"></label>'
+                '<label class="field full">專案<select name="project">'
+                f"{_project_options(projects, task.project, none_label='不分專案')}"
+                "</select></label>"
+                '</div><div class="actions"><button class="primary">儲存</button></div></div>'
+                "</form>"
+            )
+        if task.evidence and task.status != "suggested":
+            ev = task.evidence
+            if ev.memories:
+                links = "、".join(
+                    f'<a href="/app/memory/{escape(n)}">{escape(n)}</a>' for n in ev.memories
+                )
+                body += f'<div class="meta">AI 建議，依據：{links}</div>'
+        body += (
+            f'<div class="meta foot">{task.created_at:%Y-%m-%d} 建立'
+            f"・{task.updated_at:%Y-%m-%d} 更新</div>"
+        )
+        return _page(task.title, "", body)
+
+    async def new_task(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        form = await request.form()
+        back = back_to(str(form.get("next") or ""))
+        tasks = await get_tasks()
+        today = await tasks.today()
+        when = str(form.get("when") or "")
+        planned = {"today": today, "tomorrow": today + timedelta(days=1)}.get(when)
+        try:
+            await tasks.add(
+                title=str(form.get("title") or ""),
+                project=str(form.get("project") or "") or None,
+                planned_date=planned,
+                someday=when == "someday",
+            )
+        except TaskError as e:
+            return redirect(back, error=str(e))
+        return redirect(back)
+
+    async def bulk_action(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        form = await request.form()
+        to = str(form.get("to") or "")
+        tasks = await get_tasks()
+        view = await tasks.today_view()
+        try:
+            for t in view.overdue:
+                await tasks.defer(t.id, to=view.today if to == "today" else "someday")
+        except TaskError as e:
+            return redirect("/app", error=str(e))
+        return redirect("/app")
 
     async def task_action(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
@@ -475,6 +917,8 @@ def build_routes(
                 await tasks.done(task_id)
             elif action == "drop":
                 await tasks.drop(task_id)
+            elif action == "reopen":
+                await tasks.reopen(task_id)
             elif action == "confirm":
                 await tasks.confirm(task_id)
             elif action == "reject":
@@ -485,12 +929,28 @@ def build_routes(
                     task_id,
                     to=to if to in ("tomorrow", "someday") else date.fromisoformat(to),  # type: ignore[arg-type]
                 )
+            elif action == "edit":
+                fields = {
+                    k: str(form.get(k) or "").strip()
+                    for k in ("title", "project", "planned_date", "due_date")
+                }
+                await tasks.update(
+                    task_id,
+                    title=fields["title"],
+                    project=fields["project"] or None,
+                    planned_date=date.fromisoformat(fields["planned_date"])
+                    if fields["planned_date"]
+                    else None,
+                    due_date=date.fromisoformat(fields["due_date"]) if fields["due_date"] else None,
+                    clear=[k for k in ("project", "planned_date", "due_date") if not fields[k]],
+                )
             else:
                 return HTMLResponse("Unknown action.", status_code=404)
         except (TaskError, ValueError) as e:
-            sep = "&" if "?" in back else "?"
-            return RedirectResponse(f"{back}{sep}error={quote(str(e))}", status_code=303)
-        return RedirectResponse(back, status_code=303)
+            return redirect(back, error=str(e))
+        if action in ("done", "drop"):
+            return redirect(back, undo=task_id)
+        return redirect(back)
 
     async def login_page(request: Request) -> Response:
         if not auth.configured:
@@ -523,11 +983,33 @@ def build_routes(
         )
         return _page("登入", "", body)
 
+    # The manifest and icons hold nothing private and are fetched by the
+    # browser's install flow, which may not carry the session.
+    async def manifest(request: Request) -> Response:
+        return Response(_MANIFEST, media_type="application/manifest+json")
+
+    def icon(size: int) -> Callable[[Request], Awaitable[Response]]:
+        async def serve(request: Request) -> Response:
+            return Response(
+                _ICONS[size], media_type="image/png", headers={"cache-control": "max-age=86400"}
+            )
+
+        return serve
+
     return [
         Route("/app", today_page, methods=["GET"]),
         Route("/app/week", week_page, methods=["GET"]),
         Route("/app/projects", projects_page, methods=["GET"]),
+        Route("/app/projects/{name}", project_page, methods=["GET"]),
+        Route("/app/library", library_page, methods=["GET"]),
         Route("/app/memory/{name}", memory_page, methods=["GET"]),
+        Route("/app/docs/{name}", document_page, methods=["GET"]),
+        Route("/app/tasks/new", new_task, methods=["POST"]),
+        Route("/app/tasks/bulk", bulk_action, methods=["POST"]),
+        Route("/app/tasks/{task_id:int}", task_page, methods=["GET"]),
         Route("/app/tasks/{task_id:int}/{action}", task_action, methods=["POST"]),
         Route("/app/login", login_page, methods=["GET", "POST"]),
+        Route("/app/manifest.webmanifest", manifest, methods=["GET"]),
+        Route("/app/icon-180.png", icon(180), methods=["GET"]),
+        Route("/app/icon-512.png", icon(512), methods=["GET"]),
     ]

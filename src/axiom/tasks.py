@@ -437,6 +437,16 @@ class TaskStore:
         await self._require(task_id, "open", "suggested")
         return await self._set_status(task_id, "status = 'dropped', expires_at = NULL")
 
+    async def reopen(self, task_id: int) -> Task:
+        """Undo a done or drop: the task is open again with its plan intact.
+        A rejected suggestion stays rejected — that answer feeds the filter."""
+        await self._require(task_id, "done", "dropped")
+        if await self._pool.fetchval(
+            "SELECT rejected_at IS NOT NULL FROM tasks WHERE id = $1", task_id
+        ):
+            raise TaskError(f"Task {task_id} was a rejected suggestion; it cannot be reopened.")
+        return await self._set_status(task_id, "status = 'open', done_at = NULL")
+
     async def confirm(
         self,
         task_id: int,
@@ -532,6 +542,16 @@ class TaskStore:
             else:
                 view.unscheduled.append(task)
         return view
+
+    async def done_today(self) -> list[Task]:
+        """Tasks finished on the user's calendar day, latest first."""
+        rows = await self._pool.fetch(
+            f"SELECT {_COLUMNS} FROM tasks WHERE status = 'done' "
+            "AND (done_at AT TIME ZONE $1)::date = (now() AT TIME ZONE $1)::date "
+            "ORDER BY done_at DESC",
+            self._timezone,
+        )
+        return [Task.from_row(r) for r in rows]
 
     async def week_view(self, day: date | None = None) -> WeekView:
         await self.expire_suggestions()

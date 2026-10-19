@@ -61,8 +61,11 @@ mirror.
   fetched by name, versioned, never part of recall. A memory points at one
   with `doc:<name>`.
 - **Work home page** — `/app` is a phone-first page over tasks and project
-  overviews: today's list, the week, and each project's progress. Memories
-  are read-only there. Guarded by Cloudflare Access and/or the service token.
+  overviews: today's list with quick add, the week, each project's tasks and
+  progress, and a library to search memories and read documents. Tasks can be
+  edited, finished and undone there; memories and documents are read-only.
+  Installable to a phone's home screen. Guarded by Cloudflare Access and/or
+  the service token.
 - **Measurable** — `axiom eval` scores recall (hit@k, MRR) against your own
   labelled queries, so ranking changes are tested instead of guessed.
 - **Graceful degradation** — no Gemini key, or the embedding API is slow?
@@ -179,8 +182,8 @@ be overridden with an `AXIOM_`-prefixed environment variable.
 
 ### The `/app` pages
 
-`<base_url>/app` shows today's tasks, the week, and per-project progress. It
-reads every memory, so it refuses all requests unless one of these holds:
+`<base_url>/app` shows today's tasks, the week, per-project progress, and a
+library of memories and documents. It reads every memory, so it refuses all requests unless one of these holds:
 
 - A valid **Cloudflare Access** JWT for an `AXIOM_ALLOWED_EMAILS` address
   (set `AXIOM_CF_ACCESS_TEAM_DOMAIN` and `AXIOM_CF_ACCESS_AUD`). Recommended.

@@ -1,6 +1,7 @@
 """The /app pages: nothing is readable without auth (Access JWT or service
 token), task actions work through the forms, cross-site posts are refused."""
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 import asyncpg
@@ -11,8 +12,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from starlette.applications import Starlette
 
 from axiom.auth import AppAuth
+from axiom.documents import DocumentStore
 from axiom.store import MemoryStore
-from axiom.tasks import TaskStore
+from axiom.tasks import TaskError, TaskStore
 from axiom.web import build_routes
 
 TOKEN = "page-token"
@@ -33,6 +35,7 @@ def access_jwt(email: str = "me@example.com", aud: str = AUD, key=KEY) -> str:
 def make_client(pool: asyncpg.Pool, auth: AppAuth) -> httpx.AsyncClient:
     tasks = TaskStore(pool)
     memories = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    documents = DocumentStore(pool)
 
     async def get_tasks() -> TaskStore:
         return tasks
@@ -40,7 +43,14 @@ def make_client(pool: asyncpg.Pool, auth: AppAuth) -> httpx.AsyncClient:
     async def get_memories() -> MemoryStore:
         return memories
 
-    app = Starlette(routes=build_routes(auth=auth, get_tasks=get_tasks, get_memories=get_memories))
+    async def get_documents() -> DocumentStore:
+        return documents
+
+    app = Starlette(
+        routes=build_routes(
+            auth=auth, get_tasks=get_tasks, get_memories=get_memories, get_documents=get_documents
+        )
+    )
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://axiom.test")
 
 
@@ -148,3 +158,116 @@ async def test_deferred_three_times_is_flagged(client: httpx.AsyncClient, tasks:
     page = await client.get("/app", headers=BEARER)
     assert task.defer_count == 3
     assert "延了 3 次，還要做嗎？" in page.text  # noqa: RUF001
+
+
+async def test_quick_add_plans_the_task(client: httpx.AsyncClient, tasks: TaskStore):
+    response = await client.post(
+        "/app/tasks/new", data={"title": "Call the bank", "when": "tomorrow"}, headers=BEARER
+    )
+    assert response.status_code == 303
+    (task,) = await tasks.find(statuses=["open"])
+    assert task.title == "Call the bank"
+    assert task.planned_date == await tasks.today() + timedelta(days=1)
+
+    await client.post("/app/tasks/new", data={"title": "Later", "when": "someday"}, headers=BEARER)
+    later = [t for t in await tasks.find(statuses=["open"]) if t.title == "Later"]
+    assert later[0].someday
+
+    bad = await client.post("/app/tasks/new", data={"title": " ", "when": "today"}, headers=BEARER)
+    assert "error=" in bad.headers["location"]
+
+
+async def test_done_offers_undo_and_reopen_restores(client: httpx.AsyncClient, tasks: TaskStore):
+    task = await tasks.add(title="Oops", planned_date=await tasks.today())
+    response = await client.post(
+        f"/app/tasks/{task.id}/done", data={"next": "/app"}, headers=BEARER
+    )
+    assert response.headers["location"] == f"/app?undo={task.id}"
+    page = await client.get(response.headers["location"], headers=BEARER)
+    assert "已完成「Oops」" in page.text
+    assert "今天已完成" in page.text
+
+    await client.post(f"/app/tasks/{task.id}/reopen", data={"next": "/app"}, headers=BEARER)
+    reopened = await tasks.get(task.id)
+    assert reopened is not None and reopened.status == "open" and reopened.done_at is None
+
+
+async def test_rejected_suggestion_cannot_be_reopened(tasks: TaskStore, store: MemoryStore):
+    await store.remember(
+        name="p-overview",
+        description="p project overview",
+        content="x",
+        type="project",
+        source_app="t",
+    )
+    task = await tasks.add(
+        title="Maybe",
+        source="ai_suggested",
+        evidence={"trigger": "due_soon", "memories": ["p-overview"]},
+    )
+    await tasks.reject(task.id, reason="no")
+    with pytest.raises(TaskError):
+        await tasks.reopen(task.id)
+
+
+async def test_bulk_moves_every_overdue_task(client: httpx.AsyncClient, tasks: TaskStore):
+    today = await tasks.today()
+    for title in ("A", "B"):
+        await tasks.add(title=title, planned_date=today - timedelta(days=2))
+    page = await client.get("/app", headers=BEARER)
+    assert "全部移到今天" in page.text
+    await client.post("/app/tasks/bulk", data={"to": "today"}, headers=BEARER)
+    view = await tasks.today_view()
+    assert not view.overdue and len(view.due_today) == 2
+
+
+async def test_edit_renames_and_clears_dates(client: httpx.AsyncClient, tasks: TaskStore):
+    today = await tasks.today()
+    task = await tasks.add(title="Typo", planned_date=today, due_date=today)
+    page = await client.get(f"/app/tasks/{task.id}?from=/app/week", headers=BEARER)
+    assert 'href="/app/week"' in page.text
+    await client.post(
+        f"/app/tasks/{task.id}/edit",
+        data={"title": "Fixed", "planned_date": "", "due_date": "", "project": ""},
+        headers=BEARER,
+    )
+    edited = await tasks.get(task.id)
+    assert edited is not None
+    assert (edited.title, edited.planned_date, edited.due_date) == ("Fixed", None, None)
+
+
+async def test_library_project_and_doc_pages(
+    client: httpx.AsyncClient, tasks: TaskStore, pool: asyncpg.Pool
+):
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    await store.remember(
+        name="acme-overview",
+        description="Acme project overview",
+        type="project",
+        content="Status. See doc:acme-spec",
+        source_app="t",
+    )
+    await DocumentStore(pool).put(
+        name="acme-spec", title="Acme spec", body="Long text", project="acme", source_app="t"
+    )
+    await tasks.add(title="Ship console", project="acme")
+
+    project = await client.get("/app/projects/acme", headers=BEARER)
+    assert "Ship console" in project.text and "Acme spec" in project.text
+    assert 'href="/app/docs/acme-spec"' in project.text
+    assert (await client.get("/app/projects/-", headers=BEARER)).status_code == 200
+    assert "找不到" in (await client.get("/app/projects/nope", headers=BEARER)).text
+
+    library = await client.get("/app/library", headers=BEARER)
+    assert "Acme spec" in library.text and "acme-overview" in library.text
+    found = await client.get("/app/library", params={"q": "Acme"}, headers=BEARER)
+    assert "acme-overview" in found.text
+    doc = await client.get("/app/docs/acme-spec", headers=BEARER)
+    assert "Long text" in doc.text
+
+
+async def test_install_files_need_no_session(client: httpx.AsyncClient):
+    manifest = await client.get("/app/manifest.webmanifest")
+    assert manifest.status_code == 200 and manifest.json()["start_url"] == "/app"
+    icon = await client.get("/app/icon-180.png")
+    assert icon.status_code == 200 and icon.content.startswith(b"\x89PNG")

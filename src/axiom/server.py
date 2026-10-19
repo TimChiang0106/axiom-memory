@@ -679,6 +679,9 @@ async def document(
 
 
 for _route in build_routes(
-    auth=AppAuth.from_settings(get_settings()), get_tasks=get_tasks, get_memories=get_store
+    auth=AppAuth.from_settings(get_settings()),
+    get_tasks=get_tasks,
+    get_memories=get_store,
+    get_documents=get_documents,
 ):
     mcp.custom_route(_route.path, methods=sorted(_route.methods or []))(_route.endpoint)  # type: ignore[arg-type]
