@@ -7,6 +7,7 @@ silently accumulating.
 """
 
 import asyncio
+from typing import Any
 
 import asyncpg
 
@@ -68,6 +69,34 @@ _COLUMNS = (
     "m.created_at, m.updated_at, m.use_count, m.last_used_at, m.related, m.category, "
     "m.provenance"
 )
+
+
+def _similar_pairs(
+    items: list[tuple[Any, list[str]]], threshold: float
+) -> dict[tuple[Any, Any], float]:
+    """Pairs whose trigram similarity reaches `threshold`, scored the way
+    pg_trgm's similarity() does (shared distinct trigrams over their union).
+    Asking Postgres for similarity() pair by pair re-extracts both texts'
+    trigrams every time — minutes at a few hundred rows — so each item's
+    trigrams (from show_trgm) are compared here as bitmasks instead."""
+    ids: dict[str, int] = {}
+    masks = []
+    for key, grams in items:
+        mask = 0
+        for gram in grams:
+            mask |= 1 << ids.setdefault(gram, len(ids))
+        masks.append((key, mask, len(grams)))
+    found = {}
+    for i, (key_a, a, len_a) in enumerate(masks):
+        for key_b, b, len_b in masks[i + 1 :]:
+            # Similarity can't exceed the size ratio; skip the AND.
+            if not len_a or not len_b or min(len_a, len_b) < threshold * max(len_a, len_b):
+                continue
+            shared = (a & b).bit_count()
+            score = shared / (len_a + len_b - shared)
+            if score >= threshold:
+                found[(key_a, key_b)] = score
+    return found
 
 
 class MemoryStore:
@@ -546,11 +575,11 @@ class MemoryStore:
     async def recurring_events(self, *, window_days: int, min_count: int) -> list[EventCluster]:
         """Cluster recent events by trigram similarity (single-link over
         similar pairs) and return clusters big enough to suggest a pattern.
-        Volumes are personal-scale, so pairing in SQL and grouping in Python
+        Volumes are personal-scale, so pairing and grouping in Python
         is plenty."""
         events = await self._pool.fetch(
             """
-            SELECT id, content, created_at FROM events
+            SELECT id, content, created_at, show_trgm(content) AS g FROM events
             WHERE created_at >= now() - ($1 * interval '1 day')
             ORDER BY created_at DESC
             """,
@@ -558,17 +587,8 @@ class MemoryStore:
         )
         if len(events) < min_count:
             return []
-        pairs = await self._pool.fetch(
-            """
-            SELECT a.id AS id_a, b.id AS id_b
-            FROM events a
-            JOIN events b ON a.id < b.id
-            WHERE a.created_at >= now() - ($1 * interval '1 day')
-              AND b.created_at >= now() - ($1 * interval '1 day')
-              AND similarity(a.content, b.content) >= $2
-            """,
-            window_days,
-            self._event_similarity,
+        pairs = await asyncio.to_thread(
+            _similar_pairs, [(e["id"], e["g"]) for e in events], self._event_similarity
         )
 
         parent: dict[int, int] = {r["id"]: r["id"] for r in events}
@@ -579,8 +599,8 @@ class MemoryStore:
                 x = parent[x]
             return x
 
-        for p in pairs:
-            parent[find(p["id_a"])] = find(p["id_b"])
+        for id_a, id_b in pairs:
+            parent[find(id_a)] = find(id_b)
 
         by_root: dict[int, list[asyncpg.Record]] = {}
         for e in events:  # already newest-first
@@ -661,36 +681,13 @@ class MemoryStore:
         embedding pairs, when the semantic screen is enabled, catch
         paraphrases and cross-language restatements the trigrams miss.
 
-        The lexical side is pg_trgm's similarity() (shared distinct trigrams
-        over their union), but computed here: Postgres re-extracts trigrams
-        for every pair, which took two minutes at a few hundred memories.
-        Each memory's trigrams are fetched once and compared as bitmasks."""
+        The lexical side is `_similar_pairs` over each memory's trigrams."""
         rows = await self._pool.fetch(
             f"SELECT m.name, show_trgm({_SEARCH_TEXT}) AS g FROM memories m ORDER BY m.name"
         )
-        threshold = self._dedup_threshold
-
-        def lexical() -> dict[tuple[str, str], float]:
-            ids: dict[str, int] = {}
-            masks = []
-            for r in rows:
-                mask = 0
-                for gram in r["g"]:
-                    mask |= 1 << ids.setdefault(gram, len(ids))
-                masks.append((r["name"], mask, len(r["g"])))
-            found = {}
-            for i, (name_a, a, len_a) in enumerate(masks):
-                for name_b, b, len_b in masks[i + 1 :]:
-                    # Similarity can't exceed the size ratio; skip the AND.
-                    if not len_a or not len_b or min(len_a, len_b) < threshold * max(len_a, len_b):
-                        continue
-                    shared = (a & b).bit_count()
-                    score = shared / (len_a + len_b - shared)
-                    if score >= threshold:
-                        found[(name_a, name_b)] = score
-            return found
-
-        pairs = await asyncio.to_thread(lexical)
+        pairs = await asyncio.to_thread(
+            _similar_pairs, [(r["name"], r["g"]) for r in rows], self._dedup_threshold
+        )
         if self._semantic_dedup_threshold is not None:
             for r in await self._pool.fetch(
                 """
