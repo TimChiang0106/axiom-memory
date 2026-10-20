@@ -261,21 +261,66 @@ color:var(--dim)}
 .login form{display:flex;flex-direction:column;gap:12px;margin-top:16px}
 .login button{justify-content:center;min-height:40px}
 @media (max-width:380px){nav a{padding:6px 8px}.fields{grid-template-columns:1fr}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.progress{position:absolute;left:0;right:0;bottom:-1px;height:2px;overflow:hidden;opacity:0;
+transition:opacity .2s}
+.progress::before{content:"";position:absolute;top:0;bottom:0;width:30%;
+background:var(--primary);animation:slide 1s ease-in-out infinite}
+.busy .progress{opacity:1}
+@keyframes slide{from{left:-30%}to{left:100%}}
+button.pending{position:relative;color:transparent;pointer-events:none}
+button.pending::after{content:"";position:absolute;inset:0;margin:auto;width:14px;height:14px;
+border:2px solid var(--line);border-top-color:var(--fg);border-radius:50%;
+animation:spin .7s linear infinite}
+button.primary.pending::after,.notice button.pending::after{border-color:rgba(255,255,255,.3);
+border-top-color:var(--on-primary)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.skel{display:none}
+.nav main>:not(.skel){display:none}
+.nav .skel{display:block}
+.skel i{display:block;height:72px;margin-top:12px;border-radius:var(--r-card);
+background:linear-gradient(90deg,#F3F4F7 0,#E8EAEF 40%,#F3F4F7 80%) 0 0/200% 100%;
+animation:shimmer 1.2s linear infinite}
+.skel i.h{width:45%;height:28px;margin-top:24px;border-radius:var(--r-tag)}
+@keyframes shimmer{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}
+.skel i,.progress::before{animation:none}.progress::before{left:0;width:100%}}
 """
 # Progressive enhancement: post forms in place and swap in the page the
 # redirect lands on, so the list keeps its scroll position. Without
-# JavaScript the same forms post and redirect as usual.
+# JavaScript the same forms post and redirect as usual. Anything slower
+# than a blink shows a progress line under the header; leaving the page
+# also swaps the content for a skeleton, since an installed app has no
+# browser loading bar.
 _JS = """
+let timer;
+function busy(on,leaving){
+clearTimeout(timer);
+const c=document.documentElement.classList;
+if(!on){c.remove('busy','nav');return}
+timer=setTimeout(()=>{c.add('busy');if(leaving)c.add('nav')},120);
+}
+addEventListener('pageshow',()=>busy(false));
+document.addEventListener('click',e=>{
+const a=e.target.closest('a[href]');
+if(!a||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||a.target)return;
+const u=new URL(a.href,location.href);
+if(u.origin!==location.origin||!u.pathname.startsWith('/app'))return;
+if(a.closest('nav'))document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('on',x===a));
+busy(true,true);
+});
 document.addEventListener('submit',async e=>{
 const f=e.target;
-if(e.defaultPrevented||f.method!=='post'||!f.closest('main'))return;
+if(e.defaultPrevented||!f.closest('main'))return;
+if(f.method!=='post'){busy(true,true);return}
 e.preventDefault();
+const body=new FormData(f);
 const row=f.closest('.task');
 if(row&&f.action.endsWith('/done'))row.classList.add('leaving');
+else if(e.submitter){e.submitter.classList.add('pending');e.submitter.disabled=true}
 const add=f.classList.contains('add');
+busy(true);
 try{
-const r=await fetch(f.action,{method:'POST',body:new FormData(f)});
+const r=await fetch(f.action,{method:'POST',body});
 const u=new URL(r.url);
 if(!r.ok||u.pathname!==location.pathname){location.href=r.url;return}
 const doc=new DOMParser().parseFromString(await r.text(),'text/html');
@@ -284,9 +329,11 @@ document.querySelector('main').replaceWith(doc.querySelector('main'));
 history.replaceState(null,'',u.pathname+u.search);
 scrollTo(0,y);
 if(add)document.querySelector('main form.add input[name=title]')?.focus();
+busy(false);
 }catch(_){f.submit()}
 });
 """
+_SKELETON = '<div class="skel" aria-hidden="true"><i class="h"></i>' + "<i></i>" * 4 + "</div>"
 _FONTS = "https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&display=swap"
 
 
@@ -316,7 +363,8 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
         f"<title>{escape(title)} · Axiom</title>"
         f"<link rel='stylesheet' href='{_FONTS}'><style>{_CSS}</style></head>"
         f"<body><header><div class='bar'><span class='brand'>Axiom</span><nav>{nav}</nav>"
-        f"</div></header><main>{body}</main><script>{_JS}</script></body></html>"
+        f"</div><div class='progress'></div></header><main>{body}{_SKELETON}</main>"
+        f"<script>{_JS}</script></body></html>"
     )
 
 
