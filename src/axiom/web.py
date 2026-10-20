@@ -485,11 +485,14 @@ def _project_url(project: str | None) -> str:
     return f"/app/projects/{quote(project or NO_PROJECT)}"
 
 
-def _meta_text(task: Task, today: date, *, section_day: date | None = None) -> str:
+def _meta_text(
+    task: Task, today: date, *, section_day: date | None = None, in_project: bool = False
+) -> str:
     """`section_day` is the day the surrounding section already stands for,
-    so a planned date equal to it is left out."""
+    so a planned date equal to it is left out; `in_project` likewise drops
+    the project name on that project's own page."""
     parts = []
-    if task.project:
+    if task.project and not in_project:
         parts.append(escape(task.project))
     if task.planned_date and task.planned_date == section_day:
         pass
@@ -504,8 +507,10 @@ def _meta_text(task: Task, today: date, *, section_day: date | None = None) -> s
     return "・".join(parts)
 
 
-def _meta(task: Task, today: date, *, section_day: date | None = None) -> str:
-    text = _meta_text(task, today, section_day=section_day)
+def _meta(
+    task: Task, today: date, *, section_day: date | None = None, in_project: bool = False
+) -> str:
+    text = _meta_text(task, today, section_day=section_day, in_project=in_project)
     return f'<div class="meta">{text}</div>' if text else ""
 
 
@@ -550,7 +555,12 @@ def _task_actions(task: Task, today: date, *, back: str) -> str:
 
 
 def _task_card(
-    task: Task, today: date, *, back: str = "/app", section_day: date | None = None
+    task: Task,
+    today: date,
+    *,
+    back: str = "/app",
+    section_day: date | None = None,
+    in_project: bool = False,
 ) -> str:
     """One open task: a circle to finish it, and the title, which opens the
     rest of the options — so a list of tasks reads as tasks, not buttons."""
@@ -575,7 +585,7 @@ def _task_card(
     return (
         f'<div class="row task">{check}<details><summary><div>'
         f'<div class="title">{_title_html(task.title)}</div>'
-        f"{_meta(task, today, section_day=section_day)}{flags}</div>"
+        f"{_meta(task, today, section_day=section_day, in_project=in_project)}{flags}</div>"
         f'<span class="dots" aria-hidden="true">⋯</span></summary>'
         f'<div class="opts">{opts}</div></details></div>'
     )
@@ -702,7 +712,8 @@ def _inline_md(text: str) -> str:
 
 
 def _memory_row(name: str, description: str, kind: str = "") -> str:
-    tag = f'<div class="meta"><span class="tag">{kind}</span></div>' if kind else ""
+    label = TYPE_LABELS.get(kind, kind)
+    tag = f'<div class="meta"><span class="tag">{label}</span></div>' if kind else ""
     return (
         f'<a class="row" href="/app/memory/{escape(name)}"><div class="title">'
         f'{escape(name)}</div><div class="meta clamp">{escape(description)}</div>{tag}</a>'
@@ -1136,7 +1147,7 @@ def build_routes(
         )
         main = _section(
             "進行中",
-            [_task_card(t, today, back=back) for t in _by_priority(open_)],
+            [_task_card(t, today, back=back, in_project=True) for t in _by_priority(open_)],
             empty="沒有進行中的事。",
         )
         main += _section(
