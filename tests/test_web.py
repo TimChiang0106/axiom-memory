@@ -131,6 +131,20 @@ async def test_task_actions_from_the_page(client: httpx.AsyncClient, tasks: Task
     assert done is not None and done.status == "done"
 
 
+async def test_today_orders_by_label_and_drops_the_section_date(
+    client: httpx.AsyncClient, tasks: TaskStore
+):
+    today = await tasks.today()
+    for title in ("[有時間再做] Later", "Plain", "[P2] Second", "[P1] First"):
+        await tasks.add(title=title, planned_date=today)
+    page = (await client.get("/app", headers=BEARER)).text
+    order = [page.index(t) for t in ("First", "Second", "Plain", "Later")]
+    assert order == sorted(order)
+    assert '<span class="tag hi">P1</span>First' in page
+    assert "計畫 今天" not in page
+    assert "還沒安排" not in page
+
+
 async def test_cross_origin_post_is_refused(client: httpx.AsyncClient, tasks: TaskStore):
     task = await tasks.add(title="Loose end")
     response = await client.post(

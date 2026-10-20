@@ -99,6 +99,7 @@ h2 .count{font-weight:400}
 .back{display:inline-block;margin-top:16px;font-size:14px;color:var(--dim);text-decoration:none}
 .back:hover{color:var(--fg)}
 .summary{margin:24px 4px 0}
+.summary .date{font-size:14px;color:var(--dim)}
 .summary .main{font-size:22px;font-weight:700;line-height:1.4}
 .summary .sub{color:var(--dim)}
 .summary .todo{color:var(--warn);font-weight:600}
@@ -115,6 +116,34 @@ a.row:hover{background:var(--selected)}
 .bad{color:var(--bad)}
 .tag{display:inline-block;font-size:12px;padding:0 6px;border-radius:var(--r-tag);
 background:var(--selected);color:var(--dim)}
+.title .tag{margin-right:6px;vertical-align:2px;font-weight:600;line-height:18px}
+.tag.hi{background:var(--primary);color:var(--on-primary)}
+.tag.lo{background:transparent;box-shadow:inset 0 0 0 1px var(--line);font-weight:400}
+.task{display:flex;gap:4px;align-items:flex-start;transition:opacity .2s}
+.task.leaving{opacity:.4}
+.check{margin:-6px 0 0 -8px}
+.check button{width:36px;height:36px;min-height:0;padding:0;justify-content:center;
+background:transparent;border:0}
+.check button::before{content:"";width:20px;height:20px;border:1.5px solid var(--input);
+border-radius:50%;transition:background-color .15s,border-color .15s}
+.check button:hover{background:transparent}
+.check button:hover::before{border-color:var(--fg)}
+.leaving .check button::before{background:var(--primary);border-color:var(--primary)}
+.task details{flex:1;min-width:0}
+.task summary{display:flex;gap:8px;list-style:none;cursor:pointer}
+.task summary::-webkit-details-marker{display:none}
+.task summary>div{flex:1;min-width:0}
+.task summary .dots{color:var(--input);line-height:1.5;padding:0 2px}
+.task details[open] .dots{color:var(--fg)}
+.task summary:focus-visible{outline:2px solid var(--fg);outline-offset:2px;
+border-radius:var(--r-tag)}
+.opts{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.opts form{margin:0}
+.opts .end{margin-left:auto}
+a.btn{display:inline-flex;align-items:center;min-height:36px;padding:0 14px;font-size:14px;
+line-height:1;color:var(--fg);text-decoration:none;border:1px solid var(--line);
+border-radius:var(--r-ctl);transition:background-color .15s}
+a.btn:hover{background:var(--selected)}
 .actions,.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .actions{margin-top:12px}
 .actions.flush,.row.flush .metrics{margin-top:0}
@@ -205,6 +234,30 @@ color:var(--dim)}
 @media (max-width:380px){nav a{padding:6px 8px}.fields{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 """
+# Progressive enhancement: post forms in place and swap in the page the
+# redirect lands on, so the list keeps its scroll position. Without
+# JavaScript the same forms post and redirect as usual.
+_JS = """
+document.addEventListener('submit',async e=>{
+const f=e.target;
+if(e.defaultPrevented||f.method!=='post'||!f.closest('main'))return;
+e.preventDefault();
+const row=f.closest('.task');
+if(row&&f.action.endsWith('/done'))row.classList.add('leaving');
+const add=f.classList.contains('add');
+try{
+const r=await fetch(f.action,{method:'POST',body:new FormData(f)});
+const u=new URL(r.url);
+if(!r.ok||u.pathname!==location.pathname){location.href=r.url;return}
+const doc=new DOMParser().parseFromString(await r.text(),'text/html');
+const y=scrollY;
+document.querySelector('main').replaceWith(doc.querySelector('main'));
+history.replaceState(null,'',u.pathname+u.search);
+scrollTo(0,y);
+if(add)document.querySelector('main form.add input[name=title]')?.focus();
+}catch(_){f.submit()}
+});
+"""
 _FONTS = "https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&display=swap"
 
 
@@ -233,8 +286,42 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
         f"<title>{escape(title)} · Axiom</title>"
         f"<link rel='stylesheet' href='{_FONTS}'><style>{_CSS}</style></head>"
         f"<body><header><div class='bar'><span class='brand'>Axiom</span><nav>{nav}</nav>"
-        f"</div></header><main>{body}</main></body></html>"
+        f"</div></header><main>{body}</main><script>{_JS}</script></body></html>"
     )
+
+
+# A leading "[P1]" or "[有時間再做]" in a title is a priority label the AI
+# clients write; it is shown as a tag and used to order a section.
+_LABEL = re.compile(r"^\[([^\[\]]{1,10})\]\s*")
+
+
+def _split_label(title: str) -> tuple[str | None, str]:
+    if m := _LABEL.match(title):
+        return m.group(1), title[m.end() :]
+    return None, title
+
+
+def _rank(task: Task) -> int:
+    """P0..P9 first by number, then unlabelled, then any other label
+    ("有時間再做" and the like mean "not now")."""
+    label, _ = _split_label(task.title)
+    if label is None:
+        return 10
+    if re.fullmatch(r"P\d", label):
+        return int(label[1])
+    return 11
+
+
+def _by_priority(tasks: list[Task]) -> list[Task]:
+    return sorted(tasks, key=_rank)
+
+
+def _title_html(title: str) -> str:
+    label, rest = _split_label(title)
+    if label is None:
+        return escape(title)
+    cls = "hi" if label in ("P0", "P1") else "" if re.fullmatch(r"P\d", label) else "lo"
+    return f'<span class="tag {cls}">{escape(label)}</span>{escape(rest)}'
 
 
 def _day(d: date, today: date | None = None) -> str:
@@ -261,11 +348,15 @@ def _project_url(project: str | None) -> str:
     return f"/app/projects/{quote(project or NO_PROJECT)}"
 
 
-def _meta_text(task: Task, today: date) -> str:
+def _meta_text(task: Task, today: date, *, section_day: date | None = None) -> str:
+    """`section_day` is the day the surrounding section already stands for,
+    so a planned date equal to it is left out."""
     parts = []
     if task.project:
         parts.append(escape(task.project))
-    if task.planned_date:
+    if task.planned_date and task.planned_date == section_day:
+        pass
+    elif task.planned_date:
         parts.append(f"計畫 {_day(task.planned_date, today)}")
     elif task.someday:
         parts.append("之後再說")
@@ -276,8 +367,8 @@ def _meta_text(task: Task, today: date) -> str:
     return "・".join(parts)
 
 
-def _meta(task: Task, today: date) -> str:
-    text = _meta_text(task, today)
+def _meta(task: Task, today: date, *, section_day: date | None = None) -> str:
+    text = _meta_text(task, today, section_day=section_day)
     return f'<div class="meta">{text}</div>' if text else ""
 
 
@@ -321,14 +412,35 @@ def _task_actions(task: Task, today: date, *, back: str) -> str:
     )
 
 
-def _task_card(task: Task, today: date, *, back: str = "/app") -> str:
+def _task_card(
+    task: Task, today: date, *, back: str = "/app", section_day: date | None = None
+) -> str:
+    """One open task: a circle to finish it, and the title, which opens the
+    rest of the options — so a list of tasks reads as tasks, not buttons."""
     flags = ""
     if task.defer_count >= 3:
         flags += f'<div class="flag">延了 {task.defer_count} 次，還要做嗎？</div>'
+    check = (
+        f'<form method="post" action="/app/tasks/{task.id}/done" class="check">'
+        f'<input type="hidden" name="next" value="{escape(back)}">'
+        f'<button aria-label="完成「{escape(task.title)}」"></button></form>'
+    )
+    days = "".join(
+        _defer(task.id, _day(d), d.isoformat(), back=back) for d in later_this_week(today)
+    )
+    opts = (
+        _defer(task.id, "明天", "tomorrow", back=back)
+        + _defer(task.id, "之後再說", "someday", back=back)
+        + days
+        + f'<a class="btn" href="{escape(_task_url(task, back))}">編輯</a>'
+        + _button(task.id, "drop", "刪除", back=back, cls="quiet", confirm="刪除這件事？")
+    )
     return (
-        f'<div class="row"><div class="title"><a href="{escape(_task_url(task, back))}">'
-        f"{escape(task.title)}</a></div>{_meta(task, today)}{flags}"
-        f'<div class="actions">{_task_actions(task, today, back=back)}</div></div>'
+        f'<div class="row task">{check}<details><summary><div>'
+        f'<div class="title">{_title_html(task.title)}</div>'
+        f"{_meta(task, today, section_day=section_day)}{flags}</div>"
+        f'<span class="dots" aria-hidden="true">⋯</span></summary>'
+        f'<div class="opts">{opts}</div></details></div>'
     )
 
 
@@ -336,7 +448,7 @@ def _done_card(task: Task, *, back: str) -> str:
     return (
         '<div class="row"><div class="actions flush">'
         f'<a class="done grow" href="{escape(_task_url(task, back))}">'
-        f"{escape(task.title)}</a>"
+        f"{escape(_split_label(task.title)[1])}</a>"
         f"{_button(task.id, 'reopen', '復原', back=back, cls='quiet')}</div></div>"
     )
 
@@ -361,7 +473,7 @@ def _suggestion_card(task: Task, today: date, *, back: str = "/app") -> str:
         "<button>拒絕</button></form>"
     )
     return (
-        f'<div class="row"><div class="title">{escape(task.title)}</div>'
+        f'<div class="row"><div class="title">{_title_html(task.title)}</div>'
         f'{_meta(task, today)}{evidence}<div class="actions">'
         f"{_button(task.id, 'confirm', '確認', back=back, cls='primary')}{reject}</div></div>"
     )
@@ -494,6 +606,7 @@ def build_routes(
         today = view.today
         n_today = len(view.overdue) + len(view.due_today)
         status = (
+            f'<div class="date">{_day(today)}</div>'
             f'<div class="main">今天 {n_today} 件</div>'
             f'<div class="sub">其他 {view.arranged} 件都已排好日期</div>'
         )
@@ -513,13 +626,14 @@ def build_routes(
                 )
                 + "</div>"
             )
-        body += _section("逾期", [_task_card(t, today) for t in view.overdue], tools=bulk)
-        body += _section("今天", [_task_card(t, today) for t in view.due_today])
         body += _section(
-            "還沒安排",
-            [_task_card(t, today) for t in view.unscheduled],
-            empty="全部都有安排了" if (view.overdue or view.due_today or view.suggested) else None,
+            "逾期", [_task_card(t, today) for t in _by_priority(view.overdue)], tools=bulk
         )
+        body += _section(
+            "今天",
+            [_task_card(t, today, section_day=today) for t in _by_priority(view.due_today)],
+        )
+        body += _section("還沒安排", [_task_card(t, today) for t in view.unscheduled])
         body += _section("AI 建議待確認", [_suggestion_card(t, today) for t in view.suggested])
         if not (view.overdue or view.due_today or view.unscheduled or view.suggested):
             body += '<div class="list"><div class="empty">今天沒有要處理的事。</div></div>'
@@ -545,7 +659,7 @@ def build_routes(
             items = (
                 "".join(
                     f'<div class="t{" done" if t.status == "done" else ""}">'
-                    f'<a href="{escape(_task_url(t, back))}">{escape(t.title)}</a></div>'
+                    f'<a href="{escape(_task_url(t, back))}">{_title_html(t.title)}</a></div>'
                     for t in day_tasks
                 )
                 or '<div class="t meta">—</div>'
@@ -673,7 +787,9 @@ def build_routes(
             f'<div class="list"><div class="row flush">{_metrics(stats.get(project))}</div></div>'
         )
         body += _section(
-            "進行中", [_task_card(t, today, back=back) for t in open_], empty="沒有進行中的事。"
+            "進行中",
+            [_task_card(t, today, back=back) for t in _by_priority(open_)],
+            empty="沒有進行中的事。",
         )
         body += _section(
             "AI 建議待確認", [_suggestion_card(t, today, back=back) for t in suggested]
