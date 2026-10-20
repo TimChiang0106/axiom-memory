@@ -274,6 +274,9 @@ async def test_library_project_and_doc_pages(
 
     library = await client.get("/app/library", headers=BEARER)
     assert "Acme spec" in library.text and "acme-overview" in library.text
+    assert '<a href="/app/library?c=areas">專案與領域<span>' in library.text
+    areas = await client.get("/app/library", params={"c": "areas"}, headers=BEARER)
+    assert "acme-overview" in areas.text and "Acme spec" not in areas.text
     found = await client.get("/app/library", params={"q": "Acme"}, headers=BEARER)
     assert "acme-overview" in found.text
     doc = await client.get("/app/docs/acme-spec", headers=BEARER)

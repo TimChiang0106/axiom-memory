@@ -13,6 +13,7 @@ the page be added to a phone's home screen.
 
 import json
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from html import escape
@@ -34,6 +35,12 @@ TRIGGER_LABELS = {
     "unrecorded_commitment": "對話中提到但沒記下的承諾",
     "due_soon": "截止日將近",
     "overview_stale": "專案總覽落後",
+}
+CATEGORY_LABELS = {
+    "you": "關於你",
+    "people": "人",
+    "areas": "專案與領域",
+    "topics": "主題",
 }
 STATUS_LABELS = {
     "open": "進行中",
@@ -144,6 +151,14 @@ a.btn{display:inline-flex;align-items:center;min-height:36px;padding:0 14px;font
 line-height:1;color:var(--fg);text-decoration:none;border:1px solid var(--line);
 border-radius:var(--r-ctl);transition:background-color .15s}
 a.btn:hover{background:var(--selected)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.chips a{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:0 14px;
+font-size:14px;color:var(--fg);text-decoration:none;border:1px solid var(--line);
+border-radius:var(--r-ctl);transition:background-color .15s}
+.chips a:hover{background:var(--selected)}
+.chips a.on{background:var(--selected);border-color:var(--fg);font-weight:600}
+.chips span{color:var(--dim);font-weight:400}
+.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .actions,.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .actions{margin-top:12px}
 .actions.flush,.row.flush .metrics{margin-top:0}
@@ -836,7 +851,7 @@ def build_routes(
         def memory_row(name: str, description: str, kind: str) -> str:
             return (
                 f'<a class="row" href="/app/memory/{escape(name)}"><div class="title">'
-                f'{escape(name)}</div><div class="meta">{escape(description)}</div>'
+                f'{escape(name)}</div><div class="meta clamp">{escape(description)}</div>'
                 f'<div class="meta"><span class="tag">{kind}</span></div></a>'
             )
 
@@ -848,6 +863,34 @@ def build_routes(
                 empty="沒有符合的記憶。",
             )
             return _page(f"搜尋 {q}", "library", body)
+        category = request.query_params.get("c", "")
+        if category not in CATEGORY_LABELS:
+            category = ""
+        everything = await memories.list_all()
+        counts = Counter(m.category for m in everything)
+        chips = [("", "全部", len(everything))] + [
+            (key, label, counts[key]) for key, label in CATEGORY_LABELS.items() if counts[key]
+        ]
+        body += (
+            '<div class="chips" role="navigation" aria-label="記憶分類">'
+            + "".join(
+                f'<a href="{_with("/app/library", c=key) if key else "/app/library"}"'
+                f"{' class=on aria-current=page' if key == category else ''}>"
+                f"{label}<span>{n}</span></a>"
+                for key, label, n in chips
+            )
+            + "</div>"
+        )
+        if category:
+            body += _section(
+                CATEGORY_LABELS[category],
+                [
+                    memory_row(m.name, m.description, m.type)
+                    for m in everything
+                    if m.category == category
+                ],
+            )
+            return _page(CATEGORY_LABELS[category], "library", body)
         docs = await documents.list_all()
         body += _section(
             "文件",
@@ -860,9 +903,9 @@ def build_routes(
             ],
             empty="還沒有文件。",
         )
-        recent = (await memories.list_all())[:20]
         body += _section(
-            "最近更新的記憶", [memory_row(m.name, m.description, m.type) for m in recent]
+            "所有記憶・最近更新在前",
+            [memory_row(m.name, m.description, m.type) for m in everything],
         )
         return _page("資料", "library", body)
 
