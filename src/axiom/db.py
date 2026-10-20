@@ -39,7 +39,5 @@ async def run_migrations(pool: asyncpg.Pool) -> None:
                 continue
             async with conn.transaction():
                 await conn.execute(path.read_text())
-                await conn.execute(
-                    "INSERT INTO schema_migrations (version) VALUES ($1)", version
-                )
+                await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
             logger.info("Applied migration %s", path.name)

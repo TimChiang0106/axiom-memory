@@ -4,30 +4,39 @@ The home page exists to answer one question — "is everything taken care
 of?" — so it leads with a one-line status (how many today, how many already
 arranged for later, how many still need a day) and then lists only what
 needs a look now. Tasks can be added, edited, finished and undone here;
-memories and documents are shown read-only. The "我" page shows the
-`user-profile` memory, which the user's AI clients curate on request.
+documents are shown read-only. Memories can be read, traced (who wrote
+them, how often recall used them, past versions, what links to them) and
+forgotten; rewriting them stays with the AI clients. The review page turns
+`review`'s report into an inbox: forget an item, or keep it and stop seeing
+it. The "我" page shows the `user-profile` memory, which the user's AI
+clients curate on request, plus connected apps, settings and a backup.
 
 Server-rendered HTML with plain forms (POST, then redirect back): no build
 step, no client state, works on any phone browser. A manifest and icon let
 the page be added to a phone's home screen.
 """
 
+import io
 import json
 import re
+import zipfile
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from axiom.auth import AppAuth
+from axiom.config import Settings, get_settings
 from axiom.documents import DocumentStore
-from axiom.models import Memory, Task
+from axiom.export import render_index, render_memory
+from axiom.models import Memory, MemorySummary, ReviewReport, Task
 from axiom.store import MemoryStore
 from axiom.tasks import ProjectStats, TaskError, TaskStore, later_this_week
 
@@ -52,6 +61,17 @@ TYPE_LABELS = {
     "project": "專案",
 }
 PROFILE = "user-profile"
+# source_app values as the client reported them → what the user calls them.
+APP_LABELS = {
+    "openai-mcp": "ChatGPT",
+    "claude-user": "Claude",
+    "claude-code": "Claude Code",
+    "go-http-client": "程式（API）",
+    "curl": "程式（curl）",
+    "unknown": "不明",
+}
+# Query params that carry a one-shot notice and must not follow the user on.
+NOTICE_PARAMS = ("error", "undo", "forgot")
 STATUS_LABELS = {
     "open": "進行中",
     "done": "已完成",
@@ -168,6 +188,11 @@ border-radius:var(--r-ctl);transition:background-color .15s}
 .chips a:hover{background:var(--selected)}
 .chips a.on{background:var(--selected);border-color:var(--fg);font-weight:600}
 .chips span{color:var(--dim);font-weight:400}
+.pair{display:flex;align-items:flex-start;gap:8px;margin-top:8px}
+.pair form{margin:0}
+.ver summary{cursor:pointer;font-size:14px}
+.ver+.ver{margin-top:8px}
+.ver .body{margin-top:8px}
 .prose p{margin:0}
 .prose ul{margin:0;padding-left:20px}
 .prose li+li{margin-top:4px}
@@ -302,7 +327,8 @@ timer=setTimeout(()=>{c.add('busy');if(leaving)c.add('nav')},120);
 addEventListener('pageshow',()=>busy(false));
 document.addEventListener('click',e=>{
 const a=e.target.closest('a[href]');
-if(!a||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||a.target)return;
+if(!a||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||a.target||
+a.hasAttribute('download'))return;
 const u=new URL(a.href,location.href);
 if(u.origin!==location.origin||!u.pathname.startsWith('/app'))return;
 if(a.closest('nav'))document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('on',x===a));
@@ -632,6 +658,136 @@ def _memory_row(name: str, description: str, kind: str = "") -> str:
     )
 
 
+def _app(source_app: str) -> str:
+    return escape(APP_LABELS.get(source_app, source_app))
+
+
+def _mem_link(name: str) -> str:
+    return f'<a href="/app/memory/{escape(name)}">{escape(name)}</a>'
+
+
+def _forget(name: str, *, back: str, label: str = "刪除") -> str:
+    return (
+        f'<form method="post" action="/app/memory/{escape(name)}/forget" '
+        f"onsubmit=\"return confirm('刪除「{escape(name)}」？"
+        "AI 之後就查不到了，歷史版本會保留。')\">"
+        f'<input type="hidden" name="next" value="{escape(back)}">'
+        f'<button class="quiet">{label}</button></form>'
+    )
+
+
+def _keep(kind: str, key: str, label: str) -> str:
+    return (
+        '<form method="post" action="/app/review/dismiss">'
+        f'<input type="hidden" name="kind" value="{escape(kind)}">'
+        f'<input type="hidden" name="key" value="{escape(key)}">'
+        f"<button>{label}</button></form>"
+    )
+
+
+def _review_items(
+    report: ReviewReport,
+    summaries: dict[str, MemorySummary],
+    dismissed: set[tuple[str, str]],
+) -> list[tuple[str, list[str]]]:
+    """The review report as (section title, cards), minus what the user kept."""
+    back = "/app/review"
+
+    def desc(name: str) -> str:
+        m = summaries.get(name)
+        return f'<div class="meta clamp">{escape(m.description)}</div>' if m else ""
+
+    def card(head: str, body: str, actions: str) -> str:
+        return (
+            f'<div class="row"><div class="title">{head}</div>{body}'
+            f'<div class="actions">{actions}</div></div>'
+        )
+
+    sections: list[tuple[str, list[str]]] = []
+    dups = []
+    for d in report.duplicates:
+        key = f"{d.name_a}|{d.name_b}"
+        if ("duplicate", key) in dismissed:
+            continue
+        sides = "".join(
+            f'<div class="pair"><div class="grow">{_mem_link(n)}{desc(n)}</div>'
+            f"{_forget(n, back=back)}</div>"
+            for n in (d.name_a, d.name_b)
+        )
+        dups.append(
+            card(
+                f"相似度 {d.similarity:.0%}",
+                sides + '<div class="meta">要合併的話，跟 AI 說「把這兩筆合併成一筆」。</div>',
+                _keep("duplicate", key, "不是重複"),
+            )
+        )
+    sections.append(("可能重複", dups))
+
+    drifted = []
+    for o in report.drifted_overviews:
+        key = f"{o.name}@{o.updated_at.isoformat()}"
+        if ("drifted", key) in dismissed:
+            continue
+        newer = "、".join(_mem_link(n) for n in o.newer_related)
+        drifted.append(
+            card(
+                _mem_link(o.name),
+                f'<div class="meta">比它新的細節：{newer}</div>'
+                f'<div class="meta">跟 AI 說「更新 {escape(o.name)}」。</div>',
+                _keep("drifted", key, "略過"),
+            )
+        )
+    sections.append(("專案總覽落後", drifted))
+
+    for kind, title, items, hint, keep_label in (
+        ("orphan", "沒連到專案總覽", report.orphans, "跟 AI 說「把它整理進專案總覽」。", "略過"),
+        ("headless", "已結束專案留下的", report.headless, "", "保留"),
+    ):
+        cards = [
+            card(
+                _mem_link(m.name),
+                desc(m.name) + (f'<div class="meta">{hint}</div>' if hint else ""),
+                _forget(m.name, back=back) + _keep(kind, m.name, keep_label),
+            )
+            for m in items
+            if (kind, m.name) not in dismissed
+        ]
+        sections.append((title, cards))
+
+    for kind, title, items, note, keep_label in (
+        ("stale", "現況可能過時", report.stale_state, "沒更新", "還是對的"),
+        ("zombie", "很少被 AI 用到", report.zombies, "後幾乎沒被用過", "保留"),
+    ):
+        cards = [
+            card(
+                _mem_link(m.name),
+                desc(m.name) + f'<div class="meta">{m.since:%Y-%m-%d} {note}</div>',
+                _forget(m.name, back=back)
+                + _keep(kind, f"{m.name}@{m.since.isoformat()}", keep_label),
+            )
+            for m in items
+            if (kind, f"{m.name}@{m.since.isoformat()}") not in dismissed
+        ]
+        sections.append((title, cards))
+
+    recurring = []
+    for c in report.recurring:
+        key = c.samples[0][:200] if c.samples else c.first_at.isoformat()
+        if ("recurring", key) in dismissed:
+            continue
+        samples = "".join(f'<div class="meta clamp">・{escape(x)}</div>' for x in c.samples)
+        recurring.append(
+            card(
+                f"{c.count} 次・{c.first_at:%m/%d}–{c.last_at:%m/%d}",
+                samples
+                + '<div class="meta">值得記下來的話，跟 AI 說「把這個整理成一筆記憶」。</div>',
+                _keep("recurring", key, "略過"),
+            )
+        )
+    sections.append(("重複出現的動態", recurring))
+    return sections
+
+
 def _prose(text: str) -> str:
     """Paragraphs and `- ` bullet lists, each line through `_inline_md`."""
     html, items = [], []
@@ -666,7 +822,14 @@ def build_routes(
     get_tasks: Callable[[], Awaitable[TaskStore]],
     get_memories: Callable[[], Awaitable[MemoryStore]],
     get_documents: Callable[[], Awaitable[DocumentStore]],
+    settings: Settings | None = None,
 ) -> list[Route]:
+    settings = settings or get_settings()
+    zone = ZoneInfo(settings.timezone)
+
+    def local(at: datetime) -> str:
+        return f"{at.astimezone(zone):%Y-%m-%d %H:%M}"
+
     async def guard(request: Request) -> Response | None:
         if not auth.configured:
             return HTMLResponse("App auth is not configured.", status_code=503)
@@ -688,7 +851,7 @@ def build_routes(
 
     def here(request: Request) -> str:
         """The current page, minus one-shot notices, to come back to after a form."""
-        params = {k: v for k, v in request.query_params.items() if k not in ("error", "undo")}
+        params = {k: v for k, v in request.query_params.items() if k not in NOTICE_PARAMS}
         return _with(request.url.path, **params)
 
     async def notices(request: Request, tasks: TaskStore) -> str:
@@ -696,6 +859,11 @@ def build_routes(
         html = ""
         if error := request.query_params.get("error"):
             html += f'<div class="err">{escape(error)}</div>'
+        if forgot := request.query_params.get("forgot"):
+            html += (
+                '<div class="notice" role="status">'
+                f"<span>已刪除記憶「{escape(forgot)}」</span></div>"
+            )
         undo = request.query_params.get("undo", "")
         if undo.isdigit() and (task := await tasks.get(int(undo))) is not None:
             verb = {"done": "已完成", "dropped": "已刪除"}.get(task.status)
@@ -709,7 +877,7 @@ def build_routes(
     def redirect(back: str, **params: str | int) -> RedirectResponse:
         if not params:
             return RedirectResponse(back, status_code=303)
-        keep = {k: v for k, v in parse_qsl(urlparse(back).query) if k not in ("error", "undo")}
+        keep = {k: v for k, v in parse_qsl(urlparse(back).query) if k not in NOTICE_PARAMS}
         return RedirectResponse(_with(back, **keep, **params), status_code=303)
 
     async def today_page(request: Request) -> Response:
@@ -946,6 +1114,7 @@ def build_routes(
             'aria-label="搜尋記憶" enterkeyhint="search">'
             '<button class="primary">搜尋</button></form>'
         )
+        body += await notices(request, await get_tasks())
 
         if q:
             found = await memories.recall(q, limit=20, track_usage=False)
@@ -983,6 +1152,11 @@ def build_routes(
                 ],
             )
             return _page(CATEGORY_LABELS[category], "library", body)
+        body += (
+            '<div class="list add"><a class="row" href="/app/review">'
+            '<div class="title">整理記憶 ›</div>'
+            '<div class="meta">重複、過時、沒連到總覽的記憶，和 AI 最近記下的動態</div></a></div>'
+        )
         docs = await documents.list_all()
         body += _section(
             "文件",
@@ -1041,7 +1215,116 @@ def build_routes(
             '<div class="meta foot">想更新時，跟 ChatGPT 或 Claude 說'
             "「幫我整理 Axiom 的關於我」。</div>"
         )
+        body += _section(
+            "連線的 AI",
+            [
+                f'<div class="row"><div class="title">{_app(a.source_app)}</div>'
+                f'<div class="meta">{a.memories} 筆記憶・{a.events} 則動態・'
+                f"最後寫入 {local(a.last_at)}</div></div>"
+                for a in await memories.app_activity()
+            ],
+            counted=False,
+        )
+        rows = (
+            ("時區", settings.timezone),
+            ("AI 建議任務", f"每天最多 {settings.suggestion_daily_limit} 件"),
+            ("沒回應的建議", f"{settings.suggestion_ttl_days} 天後自動失效"),
+            ("現況類記憶", f"{settings.stale_state_days} 天沒更新就提醒"),
+        )
+        body += _section(
+            "設定",
+            [
+                f'<div class="row"><div class="actions flush"><span class="grow">{k}</span>'
+                f'<span class="meta">{escape(v)}</span></div></div>'
+                for k, v in rows
+            ],
+            counted=False,
+        )
+        body += '<div class="meta">要改設定，跟 Claude Code 說。</div>'
+        body += _section(
+            "備份",
+            [
+                '<div class="row"><div class="actions flush"><span class="meta grow">'
+                "全部記憶和文件，Markdown 格式</span>"
+                '<a class="btn" href="/app/export.zip" download>下載 .zip</a></div></div>'
+            ],
+            counted=False,
+        )
         return _page("關於我", "me", body)
+
+    async def review_page(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        memories = await get_memories()
+        report = await memories.consolidation_candidates(
+            stale_state_days=settings.stale_state_days,
+            zombie_days=settings.zombie_days,
+            zombie_max_use_count=settings.zombie_max_use_count,
+            event_window_days=settings.event_window_days,
+            event_min_count=settings.event_min_count,
+        )
+        summaries = {m.name: m for m in await memories.list_all()}
+        sections = _review_items(report, summaries, await memories.dismissed())
+        total = sum(len(cards) for _, cards in sections)
+        body = '<a class="back" href="/app/library">‹ 資料</a><h1>整理記憶</h1>'
+        body += (
+            f'<div class="meta">{total} 筆值得看一下。刪除或保留後就不會再出現。</div>'
+            if total
+            else '<div class="meta">都整理好了。</div>'
+        )
+        body += await notices(request, await get_tasks())
+        for title, cards in sections:
+            body += _section(title, cards)
+        body += _section(
+            "AI 最近記下的動態",
+            [
+                f'<div class="row"><div class="clamp">{escape(e.content)}</div>'
+                f'<div class="meta">{_app(e.source_app)}・{local(e.created_at)}</div></div>'
+                for e in await memories.recent_events()
+            ],
+            empty="還沒有。",
+        )
+        return _page("整理記憶", "library", body)
+
+    async def forget_memory(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        form = await request.form()
+        back = back_to(str(form.get("next") or ""))
+        name = request.path_params["name"]
+        if not await (await get_memories()).forget(name):
+            return redirect(back, error=f"找不到記憶「{name}」")
+        return redirect(back, forgot=name)
+
+    async def dismiss_review(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        form = await request.form()
+        kind, key = str(form.get("kind") or ""), str(form.get("key") or "")
+        if kind and key:
+            await (await get_memories()).dismiss(kind, key)
+        return redirect("/app/review")
+
+    async def export_zip(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        memories = await get_memories()
+        documents = await get_documents()
+        everything = await memories.all_memories()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("MEMORY.md", render_index(everything))
+            for m in everything:
+                z.writestr(f"{m.category}/{m.name}.md", render_memory(m))
+            for d in await documents.list_all():
+                if doc := await documents.get(d.name):
+                    z.writestr(f"docs/{doc.name}.md", f"# {doc.title}\n\n{doc.body}\n")
+        stamp = f"{datetime.now(zone):%Y-%m-%d}"
+        return Response(
+            buf.getvalue(),
+            media_type="application/zip",
+            headers={"content-disposition": f'attachment; filename="axiom-{stamp}.zip"'},
+        )
 
     async def memory_page(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
@@ -1055,19 +1338,54 @@ def build_routes(
                 "library",
                 back + '<div class="list"><div class="empty">找不到這筆記憶。</div></div>',
             )
-        related = "、".join(
-            f'<a href="/app/memory/{escape(n)}">{escape(n)}</a>' for n in memory.related
+        related = "、".join(_mem_link(n) for n in memory.related)
+        used = (
+            f"AI 用過 {memory.use_count} 次，最後一次 {local(memory.last_used_at)}"
+            if memory.use_count and memory.last_used_at
+            else "AI 還沒用過"
         )
+        said = "你說的" if memory.provenance == "stated" else "AI 推測的"
         body = (
             f"{back}<h1>{escape(memory.name)}</h1>"
             f'<div class="meta">{escape(memory.description)}</div>'
-            f'<div class="tags"><span class="tag">{memory.type}</span>'
-            f'<span class="tag">{memory.category}</span>'
-            f"<span>{memory.updated_at:%Y-%m-%d} 更新</span></div>"
-            f'<div class="list"><div class="row"><div class="body">'
+            f'<div class="tags"><span class="tag">{TYPE_LABELS[memory.type]}</span>'
+            f'<span class="tag">{CATEGORY_LABELS[memory.category]}</span>'
+            f"<span>{said}・{_app(memory.source_app)} 最後寫入</span></div>"
+        )
+        body += await notices(request, await get_tasks())
+        if memory.possibly_stale:
+            body += '<div class="flag">可能過時：它連到的記憶有更新，或是太久沒確認。</div>'
+        body += (
+            f'<div class="list add"><div class="row"><div class="body">'
             f"{_inline_md(memory.content)}</div></div>"
             + (f'<div class="row meta">相關：{related}</div>' if related else "")
             + "</div>"
+        )
+        body += (
+            '<div class="list"><div class="row"><div class="meta">'
+            f"{local(memory.created_at)} 建立・{local(memory.updated_at)} 更新</div>"
+            f'<div class="meta">{used}</div></div></div>'
+        )
+        body += _section(
+            "被這些記憶連結",
+            [_memory_row(m.name, m.description) for m in await memories.backlinks(memory.name)],
+        )
+        versions = await memories.history(memory.name)
+        body += _section(
+            "歷史版本",
+            [
+                f'<div class="row"><details class="ver"><summary>'
+                f"{local(v.written_at)}・{_app(v.source_app)}</summary>"
+                f'<div class="meta">{escape(v.description)}</div>'
+                f'<div class="body">{_inline_md(v.content)}</div></details></div>'
+                for v in versions
+                if v.reason == "updated"
+            ],
+        )
+        body += (
+            '<div class="list"><div class="row"><div class="actions flush">'
+            '<span class="meta grow">內容要改的話，跟 AI 說要怎麼改。</span>'
+            f"{_forget(memory.name, back='/app/library')}</div></div></div>"
         )
         return _page(memory.name, "library", body)
 
@@ -1297,6 +1615,10 @@ def build_routes(
         Route("/app/library", library_page, methods=["GET"]),
         Route("/app/me", me_page, methods=["GET"]),
         Route("/app/memory/{name}", memory_page, methods=["GET"]),
+        Route("/app/memory/{name}/forget", forget_memory, methods=["POST"]),
+        Route("/app/review", review_page, methods=["GET"]),
+        Route("/app/review/dismiss", dismiss_review, methods=["POST"]),
+        Route("/app/export.zip", export_zip, methods=["GET"]),
         Route("/app/docs/{name}", document_page, methods=["GET"]),
         Route("/app/tasks/new", new_task, methods=["POST"]),
         Route("/app/tasks/bulk", bulk_action, methods=["POST"]),

@@ -1,6 +1,8 @@
 """The /app pages: nothing is readable without auth (Access JWT or service
 token), task actions work through the forms, cross-site posts are refused."""
 
+import io
+import zipfile
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -316,3 +318,86 @@ async def test_me_page_shows_the_profile_and_what_is_newer(
     assert "<h2>身分</h2>" in page and "<li><strong>結論先講</strong></li>" in page
     assert "有 1 筆關於你的記憶比總覽新" in page
     assert "<h2>偏好" in page and "likes-tea" in page
+
+
+async def test_memory_page_traces_and_forgets(client: httpx.AsyncClient, pool: asyncpg.Pool):
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    for content in ("First take.", "Second take."):
+        await store.remember(
+            name="tea-note",
+            description="Tea note",
+            type="preference",
+            category="you",
+            content=content,
+            source_app="openai-mcp",
+        )
+    await store.remember(
+        name="drinks",
+        description="Drinks",
+        type="fact",
+        content="See tea.",
+        related=["tea-note"],
+        source_app="claude-user",
+    )
+    page = (await client.get("/app/memory/tea-note", headers=BEARER)).text
+    assert "ChatGPT 最後寫入" in page and "AI 還沒用過" in page
+    assert "被這些記憶連結" in page and 'href="/app/memory/drinks"' in page
+    assert "歷史版本" in page and "First take." in page
+
+    gone = await client.post(
+        "/app/memory/tea-note/forget", data={"next": "/app/library"}, headers=BEARER
+    )
+    assert gone.status_code == 303 and "forgot=tea-note" in gone.headers["location"]
+    assert await store.get("tea-note") is None
+    library = await client.get(gone.headers["location"], headers=BEARER)
+    assert "已刪除記憶「tea-note」" in library.text
+
+
+async def test_review_inbox_keeps_what_the_user_keeps(
+    client: httpx.AsyncClient, pool: asyncpg.Pool
+):
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    await store.remember(
+        name="shop-overview",
+        description="Shop overview",
+        type="project",
+        content="S",
+        source_app="t",
+    )
+    await store.remember(
+        name="shop-pricing",
+        description="Shop pricing",
+        type="fact",
+        content="P",
+        source_app="t",
+    )
+    page = (await client.get("/app/review", headers=BEARER)).text
+    assert "沒連到專案總覽" in page and "shop-pricing" in page
+
+    await client.post(
+        "/app/review/dismiss", data={"kind": "orphan", "key": "shop-pricing"}, headers=BEARER
+    )
+    page = (await client.get("/app/review", headers=BEARER)).text
+    assert 'href="/app/memory/shop-pricing"' not in page
+
+
+async def test_me_page_lists_apps_and_export_downloads(
+    client: httpx.AsyncClient, pool: asyncpg.Pool
+):
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    await store.remember(
+        name="likes-tea",
+        description="Tea",
+        type="preference",
+        category="you",
+        content="Tea.",
+        source_app="openai-mcp",
+    )
+    page = (await client.get("/app/me", headers=BEARER)).text
+    assert "連線的 AI" in page and "ChatGPT" in page and "1 筆記憶" in page
+    assert 'href="/app/export.zip" download' in page
+
+    archive = await client.get("/app/export.zip", headers=BEARER)
+    assert archive.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as z:
+        assert {"MEMORY.md", "you/likes-tea.md"} <= set(z.namelist())

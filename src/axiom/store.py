@@ -10,6 +10,7 @@ import asyncpg
 
 from axiom.embeddings import GeminiEmbedder, to_pgvector
 from axiom.models import (
+    AppActivity,
     Category,
     DriftedOverview,
     DuplicatePair,
@@ -362,8 +363,7 @@ class MemoryStore:
             if result != "DELETE 1":
                 return False
             await conn.execute(
-                "UPDATE memories SET related = array_remove(related, $1) "
-                "WHERE $1 = ANY(related)",
+                "UPDATE memories SET related = array_remove(related, $1) WHERE $1 = ANY(related)",
                 name,
             )
             return True
@@ -387,6 +387,53 @@ class MemoryStore:
                 "ORDER BY updated_at DESC"
             )
         return [MemorySummary(**dict(r)) for r in rows]
+
+    async def backlinks(self, name: str) -> list[MemorySummary]:
+        """Memories whose `related` points at `name`."""
+        rows = await self._pool.fetch(
+            "SELECT name, description, type, category, updated_at FROM memories "
+            "WHERE $1 = ANY(related) ORDER BY updated_at DESC",
+            name,
+        )
+        return [MemorySummary(**dict(r)) for r in rows]
+
+    async def recent_events(self, *, limit: int = 20) -> list[Event]:
+        rows = await self._pool.fetch(
+            "SELECT id, content, source_app, created_at FROM events "
+            "ORDER BY created_at DESC LIMIT $1",
+            limit,
+        )
+        return [Event(**dict(r)) for r in rows]
+
+    async def app_activity(self) -> list[AppActivity]:
+        """Per client app, most recently active first."""
+        rows = await self._pool.fetch(
+            """
+            SELECT source_app, sum(m)::int AS memories, sum(e)::int AS events,
+                   max(last_at) AS last_at
+            FROM (
+                SELECT source_app, count(*) AS m, 0 AS e, max(updated_at) AS last_at
+                FROM memories GROUP BY source_app
+                UNION ALL
+                SELECT source_app, 0, count(*), max(created_at) FROM events GROUP BY source_app
+            ) t
+            GROUP BY source_app
+            ORDER BY last_at DESC
+            """
+        )
+        return [AppActivity(**dict(r)) for r in rows]
+
+    async def dismissed(self) -> set[tuple[str, str]]:
+        """(kind, key) of review items the user chose to keep."""
+        rows = await self._pool.fetch("SELECT kind, key FROM review_dismissals")
+        return {(r["kind"], r["key"]) for r in rows}
+
+    async def dismiss(self, kind: str, key: str) -> None:
+        await self._pool.execute(
+            "INSERT INTO review_dismissals (kind, key) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            kind,
+            key,
+        )
 
     async def history(self, name: str, *, limit: int = 20) -> list[MemoryVersion]:
         """Past versions of a memory, newest first — including the final state

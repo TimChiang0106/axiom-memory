@@ -154,6 +154,16 @@ class Event(BaseModel):
     created_at: datetime
 
 
+class AppActivity(BaseModel):
+    """What one client app has written: memories it last wrote, events it
+    logged, and when it last did either."""
+
+    source_app: str
+    memories: int
+    events: int
+    last_at: datetime
+
+
 class EventCluster(BaseModel):
     """A group of similar recent events — evidence of a recurring pattern
     worth promoting to a memory (e.g. many cooking questions → a preference)."""

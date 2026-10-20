@@ -142,9 +142,7 @@ def main() -> None:
     )
     review.add_argument("--stale-state-days", type=int, default=settings.stale_state_days)
     review.add_argument("--zombie-days", type=int, default=settings.zombie_days)
-    review.add_argument(
-        "--zombie-max-use-count", type=int, default=settings.zombie_max_use_count
-    )
+    review.add_argument("--zombie-max-use-count", type=int, default=settings.zombie_max_use_count)
     review.add_argument("--event-window-days", type=int, default=settings.event_window_days)
     review.add_argument("--event-min-count", type=int, default=settings.event_min_count)
 

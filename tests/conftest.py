@@ -16,7 +16,8 @@ from axiom.tasks import TaskStore
 ADMIN_DSN = os.environ.get("AXIOM_TEST_ADMIN_DSN", "postgresql://axiom:axiom@localhost:5432/axiom")
 TEST_DB = "axiom_test"
 TRUNCATE = (
-    "TRUNCATE memories, events, memory_versions, tasks, documents, document_versions "
+    "TRUNCATE memories, events, memory_versions, tasks, documents, document_versions, "
+    "review_dismissals "
     "RESTART IDENTITY"
 )
 
