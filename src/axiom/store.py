@@ -143,6 +143,9 @@ class MemoryStore:
         # rescaled to 0..1 so it shares a scale with the lexical scores.
         # Calibrated on real data: related pairs land ~0.65, unrelated ~0.50.
         self._semantic_floor = semantic_floor
+        # The duplicate scan's last result, keyed by (row count, latest
+        # update): any write or forget changes the key.
+        self._dup_cache: tuple[tuple[int, Any], list[DuplicatePair]] | None = None
 
     async def remember(
         self,
@@ -681,7 +684,11 @@ class MemoryStore:
         embedding pairs, when the semantic screen is enabled, catch
         paraphrases and cross-language restatements the trigrams miss.
 
-        The lexical side is `_similar_pairs` over each memory's trigrams."""
+        The lexical side is `_similar_pairs` over each memory's trigrams.
+        Cached until a memory is written or forgotten."""
+        key = tuple(await self._pool.fetchrow("SELECT count(*), max(updated_at) FROM memories"))
+        if self._dup_cache and self._dup_cache[0] == key:
+            return self._dup_cache[1]
         rows = await self._pool.fetch(
             f"SELECT m.name, show_trgm({_SEARCH_TEXT}) AS g FROM memories m ORDER BY m.name"
         )
@@ -701,10 +708,12 @@ class MemoryStore:
             ):
                 key = (r["name_a"], r["name_b"])
                 pairs[key] = max(pairs.get(key, 0.0), r["similarity"])
-        return [
+        found = [
             DuplicatePair(name_a=a, name_b=b, similarity=score)
             for (a, b), score in sorted(pairs.items(), key=lambda kv: -kv[1])
         ]
+        self._dup_cache = (key, found)
+        return found
 
     async def drifted_overviews(self) -> list[DriftedOverview]:
         """Project overviews their own linked details have overtaken: the
