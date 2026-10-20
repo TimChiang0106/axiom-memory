@@ -197,6 +197,14 @@ border-radius:var(--r-ctl);transition:background-color .15s}
 .prose ul{margin:0;padding-left:20px}
 .prose li+li{margin-top:4px}
 .prose>*+*{margin-top:8px}
+.prose h3{font-size:15px;font-weight:600;margin:0}
+.prose>*+h3{margin-top:20px}
+.hint{margin:0 4px 8px}
+.rest summary{padding:14px 16px;border-top:1px solid var(--line);cursor:pointer;font-size:14px;
+color:var(--dim);list-style:none}
+.rest summary::-webkit-details-marker{display:none}
+.rest[open] summary{display:none}
+.rest>.row{border-top:1px solid var(--line)}
 .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .actions,.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .actions{margin-top:12px}
@@ -590,10 +598,18 @@ def _section(
     empty: str | None = None,
     tools: str = "",
     counted: bool = True,
+    limit: int | None = None,
 ) -> str:
     if not cards and empty is None:
         return ""
     inner = "".join(cards) if cards else f'<div class="empty">{empty}</div>'
+    if limit is not None and len(cards) > limit:
+        inner = (
+            "".join(cards[:limit])
+            + f'<details class="rest"><summary>顯示其餘 {len(cards) - limit} 筆</summary>'
+            + "".join(cards[limit:])
+            + "</details>"
+        )
     count = f'<span class="count">{len(cards)}</span>' if cards and counted else ""
     return f'<section><h2>{title}{count}</h2>{tools}<div class="list">{inner}</div></section>'
 
@@ -689,8 +705,8 @@ def _review_items(
     report: ReviewReport,
     summaries: dict[str, MemorySummary],
     dismissed: set[tuple[str, str]],
-) -> list[tuple[str, list[str]]]:
-    """The review report as (section title, cards), minus what the user kept."""
+) -> list[tuple[str, str, list[str]]]:
+    """The review report as sections, minus what the user kept."""
     back = "/app/review"
 
     def desc(name: str) -> str:
@@ -703,7 +719,8 @@ def _review_items(
             f'<div class="actions">{actions}</div></div>'
         )
 
-    sections: list[tuple[str, list[str]]] = []
+    # (title, hint for the whole section, cards)
+    sections: list[tuple[str, str, list[str]]] = []
     dups = []
     for d in report.duplicates:
         key = f"{d.name_a}|{d.name_b}"
@@ -717,11 +734,11 @@ def _review_items(
         dups.append(
             card(
                 f"相似度 {d.similarity:.0%}",
-                sides + '<div class="meta">要合併的話，跟 AI 說「把這兩筆合併成一筆」。</div>',
+                sides,
                 _keep("duplicate", key, "不是重複"),
             )
         )
-    sections.append(("可能重複", dups))
+    sections.append(("可能重複", "要合併的話，跟 AI 說「把這兩筆合併成一筆」。", dups))
 
     drifted = []
     for o in report.drifted_overviews:
@@ -737,22 +754,28 @@ def _review_items(
                 _keep("drifted", key, "略過"),
             )
         )
-    sections.append(("專案總覽落後", drifted))
+    sections.append(("專案總覽落後", "", drifted))
 
     for kind, title, items, hint, keep_label in (
-        ("orphan", "沒連到專案總覽", report.orphans, "跟 AI 說「把它整理進專案總覽」。", "略過"),
+        (
+            "orphan",
+            "沒連到專案總覽",
+            report.orphans,
+            "可以一次交給 AI：「把 Axiom 裡沒連到總覽的記憶，整理進各自的專案總覽」。",
+            "略過",
+        ),
         ("headless", "已結束專案留下的", report.headless, "", "保留"),
     ):
         cards = [
             card(
                 _mem_link(m.name),
-                desc(m.name) + (f'<div class="meta">{hint}</div>' if hint else ""),
+                desc(m.name),
                 _forget(m.name, back=back) + _keep(kind, m.name, keep_label),
             )
             for m in items
             if (kind, m.name) not in dismissed
         ]
-        sections.append((title, cards))
+        sections.append((title, hint, cards))
 
     for kind, title, items, note, keep_label in (
         ("stale", "現況可能過時", report.stale_state, "沒更新", "還是對的"),
@@ -768,7 +791,7 @@ def _review_items(
             for m in items
             if (kind, f"{m.name}@{m.since.isoformat()}") not in dismissed
         ]
-        sections.append((title, cards))
+        sections.append((title, "", cards))
 
     recurring = []
     for c in report.recurring:
@@ -779,12 +802,13 @@ def _review_items(
         recurring.append(
             card(
                 f"{c.count} 次・{c.first_at:%m/%d}–{c.last_at:%m/%d}",
-                samples
-                + '<div class="meta">值得記下來的話，跟 AI 說「把這個整理成一筆記憶」。</div>',
+                samples,
                 _keep("recurring", key, "略過"),
             )
         )
-    sections.append(("重複出現的動態", recurring))
+    sections.append(
+        ("重複出現的動態", "值得記下來的話，跟 AI 說「把這個整理成一筆記憶」。", recurring)
+    )
     return sections
 
 
@@ -799,7 +823,9 @@ def _prose(text: str) -> str:
         if items:
             html.append(f"<ul>{''.join(items)}</ul>")
             items = []
-        if line:
+        if heading := re.match(r"#{1,6}\s+(.*)", line):
+            html.append(f"<h3>{_inline_md(heading.group(1))}</h3>")
+        elif line:
             html.append(f"<p>{_inline_md(line)}</p>")
     return f'<div class="prose">{"".join(html)}</div>'
 
@@ -1265,7 +1291,7 @@ def build_routes(
         )
         summaries = {m.name: m for m in await memories.list_all()}
         sections = _review_items(report, summaries, await memories.dismissed())
-        total = sum(len(cards) for _, cards in sections)
+        total = sum(len(cards) for _, _, cards in sections)
         body = '<a class="back" href="/app/library">‹ 資料</a><h1>整理記憶</h1>'
         body += (
             f'<div class="meta">{total} 筆值得看一下。刪除或保留後就不會再出現。</div>'
@@ -1273,8 +1299,9 @@ def build_routes(
             else '<div class="meta">都整理好了。</div>'
         )
         body += await notices(request, await get_tasks())
-        for title, cards in sections:
-            body += _section(title, cards)
+        for title, hint, cards in sections:
+            tools = f'<div class="meta hint">{hint}</div>' if hint and cards else ""
+            body += _section(title, cards, tools=tools, limit=5)
         body += _section(
             "AI 最近記下的動態",
             [
@@ -1356,8 +1383,7 @@ def build_routes(
         if memory.possibly_stale:
             body += '<div class="flag">可能過時：它連到的記憶有更新，或是太久沒確認。</div>'
         body += (
-            f'<div class="list add"><div class="row"><div class="body">'
-            f"{_inline_md(memory.content)}</div></div>"
+            f'<div class="list add"><div class="row">{_prose(memory.content)}</div>'
             + (f'<div class="row meta">相關：{related}</div>' if related else "")
             + "</div>"
         )
@@ -1377,7 +1403,7 @@ def build_routes(
                 f'<div class="row"><details class="ver"><summary>'
                 f"{local(v.written_at)}・{_app(v.source_app)}</summary>"
                 f'<div class="meta">{escape(v.description)}</div>'
-                f'<div class="body">{_inline_md(v.content)}</div></details></div>'
+                f'<div class="body">{_prose(v.content)}</div></details></div>'
                 for v in versions
                 if v.reason == "updated"
             ],
