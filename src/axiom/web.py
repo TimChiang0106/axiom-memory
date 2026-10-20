@@ -204,7 +204,32 @@ border-radius:var(--r-ctl);transition:background-color .15s}
 color:var(--dim);list-style:none}
 .rest summary::-webkit-details-marker{display:none}
 .rest[open] summary{display:none}
-.rest>.row{border-top:1px solid var(--line)}
+.rest-rows>.row{border-top:1px solid var(--line)}
+.desk{display:none}
+@media (min-width:1024px){
+.bar,main{max-width:1200px;padding-left:32px;padding-right:32px}
+.split{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:0 32px;align-items:start}
+.narrow{max-width:760px}
+.desk{display:block}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:0 24px;
+align-items:start}
+.cards.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.cards.boxes{gap:12px 24px;margin-top:16px}
+.cards.boxes>.list{margin:0}
+.list.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;
+background:none;border:0;border-radius:0;overflow:visible}
+.list.grid>.row,.list.grid .rest-rows>.row,.list.grid .rest summary{
+border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--surface)}
+.list.grid>.rest{grid-column:1/-1}
+.list.grid .rest-rows{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
+gap:12px}
+.list.week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}
+.week .day{display:block;min-height:220px;padding:12px}
+.week .day+.day{border-top:0;border-left:1px solid var(--line)}
+.week .day .d{margin-bottom:8px}
+.week .t{font-size:14px;line-height:1.5}
+.week .t+.t{margin-top:8px}
+}
 .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .actions,.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .actions{margin-top:12px}
@@ -599,7 +624,10 @@ def _section(
     tools: str = "",
     counted: bool = True,
     limit: int | None = None,
+    grid: bool = False,
 ) -> str:
+    """A titled list. `grid` lays its rows out as cards on a wide screen;
+    `limit` shows that many and folds the rest behind a tap."""
     if not cards and empty is None:
         return ""
     inner = "".join(cards) if cards else f'<div class="empty">{empty}</div>'
@@ -607,11 +635,18 @@ def _section(
         inner = (
             "".join(cards[:limit])
             + f'<details class="rest"><summary>顯示其餘 {len(cards) - limit} 筆</summary>'
-            + "".join(cards[limit:])
-            + "</details>"
+            + f'<div class="rest-rows">{"".join(cards[limit:])}</div></details>'
         )
     count = f'<span class="count">{len(cards)}</span>' if cards and counted else ""
-    return f'<section><h2>{title}{count}</h2>{tools}<div class="list">{inner}</div></section>'
+    cls = "list grid" if grid else "list"
+    return f'<section><h2>{title}{count}</h2>{tools}<div class="{cls}">{inner}</div></section>'
+
+
+def _split(left: str, right: str) -> str:
+    """Two columns on a wide screen (main, side); stacked on a phone."""
+    if not right:
+        return left
+    return f'<div class="split"><div>{left}</div><div>{right}</div></div>'
 
 
 def _project_options(projects: list[str], selected: str | None, *, none_label: str) -> str:
@@ -922,7 +957,7 @@ def build_routes(
             status += f'<div class="todo">{len(view.unscheduled)} 件還沒安排</div>'
         body = f'<div class="summary">{status}</div>'
         body += await notices(request, tasks)
-        body += _quick_add(await tasks.known_projects())
+        main = _quick_add(await tasks.known_projects())
         bulk = ""
         if len(view.overdue) >= 2:
             bulk = (
@@ -934,20 +969,23 @@ def build_routes(
                 )
                 + "</div>"
             )
-        body += _section(
+        main += _section(
             "逾期", [_task_card(t, today) for t in _by_priority(view.overdue)], tools=bulk
         )
-        body += _section(
+        main += _section(
             "今天",
             [_task_card(t, today, section_day=today) for t in _by_priority(view.due_today)],
         )
-        body += _section("還沒安排", [_task_card(t, today) for t in view.unscheduled])
-        body += _section("AI 建議待確認", [_suggestion_card(t, today) for t in view.suggested])
+        main += _section("還沒安排", [_task_card(t, today) for t in view.unscheduled])
         if not (view.overdue or view.due_today or view.unscheduled or view.suggested):
-            body += '<div class="list"><div class="empty">今天沒有要處理的事。</div></div>'
-        body += _section(
+            main += '<div class="list"><div class="empty">今天沒有要處理的事。</div></div>'
+        side = _section("AI 建議待確認", [_suggestion_card(t, today) for t in view.suggested])
+        side += _section(
             "今天已完成", [_done_card(t, back="/app") for t in await tasks.done_today()]
         )
+        # On a wide screen the side column stays, so it says what goes there.
+        side = side or '<div class="desk meta summary">完成的事和 AI 建議會出現在這裡。</div>'
+        body += _split(main, side)
         return _page("今天", "today", body)
 
     async def week_page(request: Request) -> Response:
@@ -985,7 +1023,7 @@ def build_routes(
             f'<a href="/app/week?d={next_week}">下週 ›</a></div>'
         )
         body += await notices(request, tasks)
-        body += f'<div class="list">{"".join(cols)}</div>'
+        body += f'<div class="list week">{"".join(cols)}</div>'
         groups: dict[str, list[Task]] = {}
         for t in view.done:
             groups.setdefault(t.project or "未分專案", []).append(t)
@@ -996,7 +1034,7 @@ def build_routes(
             + "</div>"
             for project, items in groups.items()
         ]
-        body += _section("這週已完成", rows, empty="還沒有。")
+        body += _section("這週已完成", rows, empty="還沒有。", grid=True)
         return _page("本週", "week", body)
 
     async def projects_page(request: Request) -> Response:
@@ -1059,7 +1097,9 @@ def build_routes(
         cards = [card(o.name.removesuffix("-overview"), o) for o in ordered]
         cards += [card(p, None) for p in stats if p not in known]
         body = "<h1>專案</h1>" + (
-            "".join(cards) or '<div class="list"><div class="empty">沒有專案。</div></div>'
+            f'<div class="cards boxes">{"".join(cards)}</div>'
+            if cards
+            else '<div class="list"><div class="empty">沒有專案。</div></div>'
         )
         return _page("專案", "projects", body)
 
@@ -1094,17 +1134,18 @@ def build_routes(
         body += (
             f'<div class="list"><div class="row flush">{_metrics(stats.get(project))}</div></div>'
         )
-        body += _section(
+        main = _section(
             "進行中",
             [_task_card(t, today, back=back) for t in _by_priority(open_)],
             empty="沒有進行中的事。",
         )
-        body += _section(
+        main += _section(
             "AI 建議待確認", [_suggestion_card(t, today, back=back) for t in suggested]
         )
-        body += _section("最近完成", [_done_card(t, back=back) for t in done])
+        main += _section("最近完成", [_done_card(t, back=back) for t in done])
+        side = ""
         if overview:
-            body += _section(
+            side += _section(
                 "總覽",
                 [
                     f'<div class="row"><div class="body">{_inline_md(overview.content)}</div>'
@@ -1116,7 +1157,7 @@ def build_routes(
             )
         if project:
             docs = await documents.list_all(project=project)
-            body += _section(
+            side += _section(
                 "文件",
                 [
                     f'<a class="row" href="/app/docs/{escape(d.name)}"><div class="title">'
@@ -1125,6 +1166,7 @@ def build_routes(
                     for d in docs
                 ],
             )
+        body += _split(main, side)
         return _page(project or "未分專案", "projects", body)
 
     async def library_page(request: Request) -> Response:
@@ -1148,6 +1190,7 @@ def build_routes(
                 "搜尋結果",
                 [_memory_row(m.name, m.description, m.type) for m in found],
                 empty="沒有符合的記憶。",
+                grid=True,
             )
             return _page(f"搜尋 {q}", "library", body)
         category = request.query_params.get("c", "")
@@ -1176,6 +1219,7 @@ def build_routes(
                     for m in everything
                     if m.category == category
                 ],
+                grid=True,
             )
             return _page(CATEGORY_LABELS[category], "library", body)
         body += (
@@ -1194,10 +1238,12 @@ def build_routes(
                 for d in docs
             ],
             empty="還沒有文件。",
+            grid=True,
         )
         body += _section(
             "所有記憶・最近更新在前",
             [_memory_row(m.name, m.description, m.type) for m in everything],
+            grid=True,
         )
         return _page("資料", "library", body)
 
@@ -1225,23 +1271,28 @@ def build_routes(
                     f"有 {len(newer)} 筆關於你的記憶比總覽新，可以請 AI 重新整理</summary>"
                     f'<div class="meta">{names}</div></details>'
                 )
+            cards = ""
             for heading, text in _profile_sections(profile.content):
                 card = f'<div class="row">{_prose(text)}</div>'
-                body += (
+                cards += (
                     _section(escape(heading), [card], counted=False)
                     if heading
-                    else (f'<div class="list">{card}</div>')
+                    else f'<div class="list">{card}</div>'
                 )
+            body += f'<div class="cards two">{cards}</div>'
         groups: dict[str, list[str]] = {}
         for m in mine:
             groups.setdefault(m.type, []).append(_memory_row(m.name, m.description))
-        for kind, label in TYPE_LABELS.items():
-            body += _section(label, groups.get(kind, []))
+        body += (
+            '<div class="cards">'
+            + "".join(_section(label, groups.get(kind, [])) for kind, label in TYPE_LABELS.items())
+            + "</div>"
+        )
         body += (
             '<div class="meta foot">想更新時，跟 ChatGPT 或 Claude 說'
             "「幫我整理 Axiom 的關於我」。</div>"
         )
-        body += _section(
+        extras = _section(
             "連線的 AI",
             [
                 f'<div class="row"><div class="title">{_app(a.source_app)}</div>'
@@ -1257,17 +1308,17 @@ def build_routes(
             ("沒回應的建議", f"{settings.suggestion_ttl_days} 天後自動失效"),
             ("現況類記憶", f"{settings.stale_state_days} 天沒更新就提醒"),
         )
-        body += _section(
+        extras += _section(
             "設定",
             [
                 f'<div class="row"><div class="actions flush"><span class="grow">{k}</span>'
                 f'<span class="meta">{escape(v)}</span></div></div>'
                 for k, v in rows
             ],
+            tools='<div class="meta hint">要改設定，跟 Claude Code 說。</div>',
             counted=False,
         )
-        body += '<div class="meta">要改設定，跟 Claude Code 說。</div>'
-        body += _section(
+        extras += _section(
             "備份",
             [
                 '<div class="row"><div class="actions flush"><span class="meta grow">'
@@ -1276,6 +1327,7 @@ def build_routes(
             ],
             counted=False,
         )
+        body += f'<div class="cards">{extras}</div>'
         return _page("關於我", "me", body)
 
     async def review_page(request: Request) -> Response:
@@ -1301,7 +1353,7 @@ def build_routes(
         body += await notices(request, await get_tasks())
         for title, hint, cards in sections:
             tools = f'<div class="meta hint">{hint}</div>' if hint and cards else ""
-            body += _section(title, cards, tools=tools, limit=5)
+            body += _section(title, cards, tools=tools, limit=6, grid=True)
         body += _section(
             "AI 最近記下的動態",
             [
@@ -1310,6 +1362,7 @@ def build_routes(
                 for e in await memories.recent_events()
             ],
             empty="還沒有。",
+            grid=True,
         )
         return _page("整理記憶", "library", body)
 
@@ -1382,22 +1435,22 @@ def build_routes(
         body += await notices(request, await get_tasks())
         if memory.possibly_stale:
             body += '<div class="flag">可能過時：它連到的記憶有更新，或是太久沒確認。</div>'
-        body += (
+        main = (
             f'<div class="list add"><div class="row">{_prose(memory.content)}</div>'
             + (f'<div class="row meta">相關：{related}</div>' if related else "")
             + "</div>"
         )
-        body += (
-            '<div class="list"><div class="row"><div class="meta">'
+        side = (
+            '<div class="list add"><div class="row"><div class="meta">'
             f"{local(memory.created_at)} 建立・{local(memory.updated_at)} 更新</div>"
             f'<div class="meta">{used}</div></div></div>'
         )
-        body += _section(
+        side += _section(
             "被這些記憶連結",
             [_memory_row(m.name, m.description) for m in await memories.backlinks(memory.name)],
         )
         versions = await memories.history(memory.name)
-        body += _section(
+        side += _section(
             "歷史版本",
             [
                 f'<div class="row"><details class="ver"><summary>'
@@ -1408,11 +1461,12 @@ def build_routes(
                 if v.reason == "updated"
             ],
         )
-        body += (
+        side += (
             '<div class="list"><div class="row"><div class="actions flush">'
             '<span class="meta grow">內容要改的話，跟 AI 說要怎麼改。</span>'
             f"{_forget(memory.name, back='/app/library')}</div></div></div>"
         )
+        body += _split(main, side)
         return _page(memory.name, "library", body)
 
     async def document_page(request: Request) -> Response:
@@ -1439,7 +1493,7 @@ def build_routes(
             f'<div class="list"><div class="row"><div class="body">{_inline_md(doc.body)}'
             "</div></div></div>"
         )
-        return _page(doc.title, "library", body)
+        return _page(doc.title, "library", f'<div class="narrow">{body}</div>')
 
     async def task_page(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
@@ -1505,7 +1559,7 @@ def build_routes(
             f'<div class="meta foot">{task.created_at:%Y-%m-%d} 建立'
             f"・{task.updated_at:%Y-%m-%d} 更新</div>"
         )
-        return _page(task.title, "", body)
+        return _page(task.title, "", f'<div class="narrow">{body}</div>')
 
     async def new_task(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
