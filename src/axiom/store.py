@@ -6,6 +6,8 @@ similarity) before insertion so near-duplicates are surfaced instead of
 silently accumulating.
 """
 
+import asyncio
+
 import asyncpg
 
 from axiom.embeddings import GeminiEmbedder, to_pgvector
@@ -614,32 +616,7 @@ class MemoryStore:
         behind their own details (refresh the source of truth?), project notes
         orphaned from their overview (fold in?), and recurring episodic events
         (promote to a memory?)."""
-        # Lexical pairs catch same-wording duplicates; embedding pairs, when
-        # the semantic screen is enabled, catch paraphrases and
-        # cross-language restatements the trigrams miss.
-        dup_rows = await self._pool.fetch(
-            f"""
-            SELECT a.name AS name_a, b.name AS name_b,
-                   GREATEST(
-                       similarity({_SEARCH_TEXT.replace("m.", "a.")},
-                                  {_SEARCH_TEXT.replace("m.", "b.")}),
-                       CASE WHEN $2::float8 IS NULL
-                                 OR a.embedding IS NULL OR b.embedding IS NULL THEN 0
-                            ELSE 1 - (a.embedding <=> b.embedding)
-                       END
-                   )::float8 AS similarity
-            FROM memories a
-            JOIN memories b ON a.name < b.name
-            WHERE similarity({_SEARCH_TEXT.replace("m.", "a.")},
-                             {_SEARCH_TEXT.replace("m.", "b.")}) >= $1
-               OR ($2::float8 IS NOT NULL
-                   AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-                   AND 1 - (a.embedding <=> b.embedding) >= $2::float8)
-            ORDER BY similarity DESC
-            """,
-            self._dedup_threshold,
-            self._semantic_dedup_threshold,
-        )
+        dup_pairs = await self._duplicate_pairs()
         stale_rows = await self._pool.fetch(
             """
             SELECT name, type, category, COALESCE(last_used_at, updated_at) AS since
@@ -668,7 +645,7 @@ class MemoryStore:
         )
         headless_rows = await self._pool.fetch(_HEADLESS_SQL, _OVERVIEW_SUFFIX, None)
         return ReviewReport(
-            duplicates=[DuplicatePair(**dict(r)) for r in dup_rows],
+            duplicates=dup_pairs,
             stale_state=[StaleMemory(**dict(r)) for r in stale_rows],
             zombies=[StaleMemory(**dict(r)) for r in zombie_rows],
             drifted_overviews=await self.drifted_overviews(),
@@ -678,6 +655,59 @@ class MemoryStore:
                 window_days=event_window_days, min_count=event_min_count
             ),
         )
+
+    async def _duplicate_pairs(self) -> list[DuplicatePair]:
+        """Near-duplicate pairs. Lexical pairs catch same-wording duplicates;
+        embedding pairs, when the semantic screen is enabled, catch
+        paraphrases and cross-language restatements the trigrams miss.
+
+        The lexical side is pg_trgm's similarity() (shared distinct trigrams
+        over their union), but computed here: Postgres re-extracts trigrams
+        for every pair, which took two minutes at a few hundred memories.
+        Each memory's trigrams are fetched once and compared as bitmasks."""
+        rows = await self._pool.fetch(
+            f"SELECT m.name, show_trgm({_SEARCH_TEXT}) AS g FROM memories m ORDER BY m.name"
+        )
+        threshold = self._dedup_threshold
+
+        def lexical() -> dict[tuple[str, str], float]:
+            ids: dict[str, int] = {}
+            masks = []
+            for r in rows:
+                mask = 0
+                for gram in r["g"]:
+                    mask |= 1 << ids.setdefault(gram, len(ids))
+                masks.append((r["name"], mask, len(r["g"])))
+            found = {}
+            for i, (name_a, a, len_a) in enumerate(masks):
+                for name_b, b, len_b in masks[i + 1 :]:
+                    # Similarity can't exceed the size ratio; skip the AND.
+                    if not len_a or not len_b or min(len_a, len_b) < threshold * max(len_a, len_b):
+                        continue
+                    shared = (a & b).bit_count()
+                    score = shared / (len_a + len_b - shared)
+                    if score >= threshold:
+                        found[(name_a, name_b)] = score
+            return found
+
+        pairs = await asyncio.to_thread(lexical)
+        if self._semantic_dedup_threshold is not None:
+            for r in await self._pool.fetch(
+                """
+                SELECT a.name AS name_a, b.name AS name_b,
+                       (1 - (a.embedding <=> b.embedding))::float8 AS similarity
+                FROM memories a JOIN memories b ON a.name < b.name
+                WHERE a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+                  AND 1 - (a.embedding <=> b.embedding) >= $1
+                """,
+                self._semantic_dedup_threshold,
+            ):
+                key = (r["name_a"], r["name_b"])
+                pairs[key] = max(pairs.get(key, 0.0), r["similarity"])
+        return [
+            DuplicatePair(name_a=a, name_b=b, similarity=score)
+            for (a, b), score in sorted(pairs.items(), key=lambda kv: -kv[1])
+        ]
 
     async def drifted_overviews(self) -> list[DriftedOverview]:
         """Project overviews their own linked details have overtaken: the
