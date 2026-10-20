@@ -288,3 +288,31 @@ async def test_install_files_need_no_session(client: httpx.AsyncClient):
     assert manifest.status_code == 200 and manifest.json()["start_url"] == "/app"
     icon = await client.get("/app/icon-180.png")
     assert icon.status_code == 200 and icon.content.startswith(b"\x89PNG")
+
+
+async def test_me_page_shows_the_profile_and_what_is_newer(
+    client: httpx.AsyncClient, pool: asyncpg.Pool
+):
+    assert "還沒有個人總覽" in (await client.get("/app/me", headers=BEARER)).text
+
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    await store.remember(
+        name="user-profile",
+        description="Who the user is",
+        type="fact",
+        category="you",
+        content="## 身分\nSolutions architect\n\n## 合作\n- **結論先講**\n- 白話",
+        source_app="t",
+    )
+    await store.remember(
+        name="likes-tea",
+        description="Prefers tea over coffee",
+        type="preference",
+        category="you",
+        content="Tea.",
+        source_app="t",
+    )
+    page = (await client.get("/app/me", headers=BEARER)).text
+    assert "<h2>身分</h2>" in page and "<li><strong>結論先講</strong></li>" in page
+    assert "有 1 筆關於你的記憶比總覽新" in page
+    assert "<h2>偏好" in page and "likes-tea" in page

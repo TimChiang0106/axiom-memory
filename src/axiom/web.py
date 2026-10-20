@@ -4,7 +4,8 @@ The home page exists to answer one question — "is everything taken care
 of?" — so it leads with a one-line status (how many today, how many already
 arranged for later, how many still need a day) and then lists only what
 needs a look now. Tasks can be added, edited, finished and undone here;
-memories and documents are shown read-only.
+memories and documents are shown read-only. The "我" page shows the
+`user-profile` memory, which the user's AI clients curate on request.
 
 Server-rendered HTML with plain forms (POST, then redirect back): no build
 step, no client state, works on any phone browser. A manifest and icon let
@@ -42,6 +43,15 @@ CATEGORY_LABELS = {
     "areas": "專案與領域",
     "topics": "主題",
 }
+TYPE_LABELS = {
+    "preference": "偏好",
+    "fact": "事實",
+    "state": "現況",
+    "procedural": "做法",
+    "reference": "參考",
+    "project": "專案",
+}
+PROFILE = "user-profile"
 STATUS_LABELS = {
     "open": "進行中",
     "done": "已完成",
@@ -158,6 +168,10 @@ border-radius:var(--r-ctl);transition:background-color .15s}
 .chips a:hover{background:var(--selected)}
 .chips a.on{background:var(--selected);border-color:var(--fg);font-weight:600}
 .chips span{color:var(--dim);font-weight:400}
+.prose p{margin:0}
+.prose ul{margin:0;padding-left:20px}
+.prose li+li{margin-top:4px}
+.prose>*+*{margin-top:8px}
 .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .actions,.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .actions{margin-top:12px}
@@ -282,6 +296,7 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
         ("week", "/app/week", "本週"),
         ("projects", "/app/projects", "專案"),
         ("library", "/app/library", "資料"),
+        ("me", "/app/me", "我"),
     ]
     nav = "".join(
         f'<a href="{href}"{" class=on aria-current=page" if key == active else ""}>{label}</a>'
@@ -559,6 +574,42 @@ def _inline_md(text: str) -> str:
     enough for overview memories and plain-text documents."""
     html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escape(text))
     return re.sub(r"\bdoc:([\w.-]+)", r'<a href="/app/docs/\1">doc:\1</a>', html)
+
+
+def _memory_row(name: str, description: str, kind: str = "") -> str:
+    tag = f'<div class="meta"><span class="tag">{kind}</span></div>' if kind else ""
+    return (
+        f'<a class="row" href="/app/memory/{escape(name)}"><div class="title">'
+        f'{escape(name)}</div><div class="meta clamp">{escape(description)}</div>{tag}</a>'
+    )
+
+
+def _prose(text: str) -> str:
+    """Paragraphs and `- ` bullet lists, each line through `_inline_md`."""
+    html, items = [], []
+    for line in [*text.strip().splitlines(), ""]:
+        line = line.strip()
+        if line.startswith(("- ", "* ")):
+            items.append(f"<li>{_inline_md(line[2:])}</li>")
+            continue
+        if items:
+            html.append(f"<ul>{''.join(items)}</ul>")
+            items = []
+        if line:
+            html.append(f"<p>{_inline_md(line)}</p>")
+    return f'<div class="prose">{"".join(html)}</div>'
+
+
+def _profile_sections(text: str) -> list[tuple[str, str]]:
+    """Split a profile at its `## ` headings into (heading, body) pairs; text
+    before the first heading gets an empty heading."""
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    for line in text.splitlines():
+        if line.startswith("## "):
+            sections.append((line[3:].strip(), []))
+        else:
+            sections[-1][1].append(line)
+    return [(h, "\n".join(b)) for h, b in sections if h or "".join(b).strip()]
 
 
 def build_routes(
@@ -848,18 +899,11 @@ def build_routes(
             '<button class="primary">搜尋</button></form>'
         )
 
-        def memory_row(name: str, description: str, kind: str) -> str:
-            return (
-                f'<a class="row" href="/app/memory/{escape(name)}"><div class="title">'
-                f'{escape(name)}</div><div class="meta clamp">{escape(description)}</div>'
-                f'<div class="meta"><span class="tag">{kind}</span></div></a>'
-            )
-
         if q:
             found = await memories.recall(q, limit=20, track_usage=False)
             body += _section(
                 "搜尋結果",
-                [memory_row(m.name, m.description, m.type) for m in found],
+                [_memory_row(m.name, m.description, m.type) for m in found],
                 empty="沒有符合的記憶。",
             )
             return _page(f"搜尋 {q}", "library", body)
@@ -885,7 +929,7 @@ def build_routes(
             body += _section(
                 CATEGORY_LABELS[category],
                 [
-                    memory_row(m.name, m.description, m.type)
+                    _memory_row(m.name, m.description, m.type)
                     for m in everything
                     if m.category == category
                 ],
@@ -905,9 +949,51 @@ def build_routes(
         )
         body += _section(
             "所有記憶・最近更新在前",
-            [memory_row(m.name, m.description, m.type) for m in everything],
+            [_memory_row(m.name, m.description, m.type) for m in everything],
         )
         return _page("資料", "library", body)
+
+    async def me_page(request: Request) -> Response:
+        if (denied := await guard(request)) is not None:
+            return denied
+        memories = await get_memories()
+        profile = await memories.get(PROFILE)
+        mine = [m for m in await memories.list_all(category="you") if m.name != PROFILE]
+        body = "<h1>關於我</h1>"
+        if profile is None:
+            body += (
+                '<div class="list"><div class="empty">還沒有個人總覽。跟 AI 說'
+                "「幫我整理 Axiom 的關於我」，它會從下面的記憶整理出來。</div></div>"
+            )
+        else:
+            body += f'<div class="meta">AI 整理・{profile.updated_at:%Y-%m-%d} 更新</div>'
+            newer = [m for m in mine if m.updated_at > profile.updated_at]
+            if newer:
+                names = "、".join(
+                    f'<a href="/app/memory/{escape(m.name)}">{escape(m.name)}</a>' for m in newer
+                )
+                body += (
+                    '<details class="ov"><summary class="flag">'
+                    f"有 {len(newer)} 筆關於你的記憶比總覽新，可以請 AI 重新整理</summary>"
+                    f'<div class="meta">{names}</div></details>'
+                )
+            for heading, text in _profile_sections(profile.content):
+                card = f'<div class="row">{_prose(text)}</div>'
+                body += (
+                    _section(escape(heading), [card], counted=False)
+                    if heading
+                    else (f'<div class="list">{card}</div>')
+                )
+        groups: dict[str, list[str]] = {}
+        for m in mine:
+            groups.setdefault(m.type, []).append(_memory_row(m.name, m.description))
+        for kind, label in TYPE_LABELS.items():
+            body += _section(label, groups.get(kind, []))
+        body += (
+            '<div class="meta foot">想更新時，跟 ChatGPT 或 Claude 說'
+            "「幫我整理 Axiom 的關於我」。</div>"
+        )
+        return _page("關於我", "me", body)
 
     async def memory_page(request: Request) -> Response:
         if (denied := await guard(request)) is not None:
@@ -1161,6 +1247,7 @@ def build_routes(
         Route("/app/projects", projects_page, methods=["GET"]),
         Route("/app/projects/{name}", project_page, methods=["GET"]),
         Route("/app/library", library_page, methods=["GET"]),
+        Route("/app/me", me_page, methods=["GET"]),
         Route("/app/memory/{name}", memory_page, methods=["GET"]),
         Route("/app/docs/{name}", document_page, methods=["GET"]),
         Route("/app/tasks/new", new_task, methods=["POST"]),
