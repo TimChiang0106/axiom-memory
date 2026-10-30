@@ -296,6 +296,8 @@ border-radius:var(--r-ctl)}
 .notice button{background:transparent;border-color:transparent;color:var(--on-primary);
 font-weight:600}
 .notice button:hover{background:var(--primary-hover)}
+.notice{transition:opacity .3s,transform .3s}
+.notice.gone{opacity:0;transform:translateY(8px);pointer-events:none}
 .day{display:grid;grid-template-columns:96px 1fr;gap:12px}
 .day .d{font-size:14px;color:var(--dim);padding-top:1px}
 .day.today{background:var(--selected)}
@@ -348,9 +350,23 @@ animation:shimmer 1.2s linear infinite}
 # JavaScript the same forms post and redirect as usual. Anything slower
 # than a blink shows a progress line under the header; leaving the page
 # also swaps the content for a skeleton, since an installed app has no
-# browser loading bar.
+# browser loading bar. The undo bar fades after a few seconds and its
+# query parameter goes with it, so a reload doesn't bring it back.
 _JS = """
-let timer;
+let timer,noticeTimer;
+function fade(){
+clearTimeout(noticeTimer);
+const n=document.querySelector('.notice');
+if(!n)return;
+noticeTimer=setTimeout(()=>{
+n.classList.add('gone');
+setTimeout(()=>n.remove(),300);
+const u=new URL(location.href);
+u.searchParams.delete('undo');u.searchParams.delete('forgot');
+history.replaceState(null,'',u.pathname+u.search);
+},6000);
+}
+fade();
 function busy(on,leaving){
 clearTimeout(timer);
 const c=document.documentElement.classList;
@@ -387,6 +403,7 @@ const y=scrollY;
 document.querySelector('main').replaceWith(doc.querySelector('main'));
 history.replaceState(null,'',u.pathname+u.search);
 scrollTo(0,y);
+fade();
 if(add)document.querySelector('main form.add input[name=title]')?.focus();
 busy(false);
 }catch(_){f.submit()}
