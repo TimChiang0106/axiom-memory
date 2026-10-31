@@ -16,6 +16,7 @@ from axiom.web.context import WebContext
 from axiom.web.labels import (
     NO_PROJECT,
     OPEN_WARN,
+    PRIORITIES,
     STATUS_LABELS,
     WEEKDAYS,
 )
@@ -180,7 +181,20 @@ def routes(ctx: WebContext) -> list[Route]:
         )
         cards = [card(o.name.removesuffix("-overview"), o) for o in ordered]
         cards += [card(p, None) for p in stats if p not in known]
-        body = "<h1>專案</h1>" + (
+        priorities = await memories.get(PRIORITIES)
+        order = (
+            ui.section(
+                "優先順序",
+                [
+                    f'<div class="row">{ui.prose(priorities.content)}<div class="meta foot">'
+                    f"{ui.mem_link(PRIORITIES)}・{priorities.updated_at:%Y-%m-%d} 更新</div></div>"
+                ],
+                counted=False,
+            )
+            if priorities
+            else ""
+        )
+        body = f"<h1>專案</h1>{order}" + (
             f'<div class="cards boxes">{"".join(cards)}</div>'
             if cards
             else '<div class="list"><div class="empty">沒有專案。</div></div>'

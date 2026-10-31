@@ -540,3 +540,20 @@ async def test_pages_call_a_project_by_its_name(
         'href="/app/projects/acme-agent"'
         in (await client.get("/app/projects", headers=BEARER)).text
     )
+
+
+async def test_projects_page_shows_priorities_when_kept(
+    client: httpx.AsyncClient, tasks: TaskStore, pool: asyncpg.Pool
+):
+    assert "優先順序" not in (await client.get("/app/projects", headers=BEARER)).text
+
+    await MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1).remember(
+        name="project-priorities",
+        description="The order of work across projects",
+        content="- P1 Ship the pilot\n- P2 Everything else",
+        type="project",
+        source_app="test",
+        allow_duplicate=True,
+    )
+    page = (await client.get("/app/projects", headers=BEARER)).text
+    assert "優先順序" in page and "<li>P1 Ship the pilot</li>" in page

@@ -21,6 +21,7 @@ TYPE_LABELS = {
     "project": "專案",
 }
 PROFILE = "user-profile"
+PRIORITIES = "project-priorities"
 # source_app values as the client reported them → what the user calls them.
 APP_LABELS = {
     "openai-mcp": "ChatGPT",
