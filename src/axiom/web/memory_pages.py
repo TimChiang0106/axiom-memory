@@ -170,6 +170,10 @@ def routes(ctx: WebContext) -> list[Route]:
                 f'<div class="row"><div class="actions flush"><span class="grow">{k}</span>'
                 f'<span class="meta">{escape(v)}</span></div></div>'
                 for k, v in rows
+            ]
+            + [
+                '<a class="row" href="/app/states?from=/app/me">'
+                '<div class="title">工作狀態 ›</div></a>'
             ],
             tools='<div class="meta hint">要改設定，跟 Claude Code 說。</div>',
             counted=False,

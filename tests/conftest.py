@@ -20,6 +20,8 @@ TRUNCATE = (
     "review_dismissals "
     "RESTART IDENTITY"
 )
+# Seeded by a migration, so kept; anything a test added goes.
+TRIM_STATES = "DELETE FROM task_states WHERE name NOT IN ('進行中', '遭阻擋', '等待中', '待驗證')"
 
 
 def _test_dsn() -> str:
@@ -51,6 +53,7 @@ async def store(pool: asyncpg.Pool) -> MemoryStore:
 @pytest.fixture
 async def tasks(pool: asyncpg.Pool) -> TaskStore:
     await pool.execute(TRUNCATE)
+    await pool.execute(TRIM_STATES)
     return TaskStore(pool)
 
 

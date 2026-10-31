@@ -33,7 +33,7 @@ APP_LABELS = {
 # Query params that carry a one-shot notice and must not follow the user on.
 NOTICE_PARAMS = ("error", "undo", "forgot")
 STATUS_LABELS = {
-    "open": "進行中",
+    "open": "未完成",
     "done": "已完成",
     "dropped": "已刪除",
     "suggested": "AI 建議",

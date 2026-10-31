@@ -401,3 +401,115 @@ async def test_me_page_lists_apps_and_export_downloads(
     assert archive.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(archive.content)) as z:
         assert {"MEMORY.md", "you/likes-tea.md"} <= set(z.namelist())
+
+
+async def test_edit_form_sets_state_phase_and_code(client: httpx.AsyncClient, tasks: TaskStore):
+    today = await tasks.today()
+    due = today - timedelta(days=2)
+    task = await tasks.add(title="Training date", due_date=due)
+    response = await client.post(
+        f"/app/tasks/{task.id}/edit",
+        headers=BEARER,
+        data={
+            "title": "Training date",
+            "due_date": due.isoformat(),
+            "state": "等待中",
+            "waiting_on": "Client",
+            "phase": "10 Handover",
+            "code": "FO-9.1",
+        },
+    )
+    assert response.status_code == 303
+    saved = await tasks.get(task.id)
+    assert saved is not None
+    assert (saved.state, saved.waiting_on, saved.phase, saved.code) == (
+        "等待中",
+        "Client",
+        "10 Handover",
+        "FO-9.1",
+    )
+
+    page = (await client.get("/app", headers=BEARER)).text
+    assert "等別人" in page and "等 Client" in page and "FO-9.1" in page
+    assert "逾期" not in page
+
+    detail = (await client.get(f"/app/tasks/{task.id}", headers=BEARER)).text
+    assert '<option value="等待中" selected>' in detail
+    assert '<option value="10 Handover">' in detail
+
+
+async def test_edit_form_drops_waiting_on_for_a_state_that_does_not_wait(
+    client: httpx.AsyncClient, tasks: TaskStore
+):
+    task = await tasks.add(title="Review", state="等待中", waiting_on="Client")
+    response = await client.post(
+        f"/app/tasks/{task.id}/edit",
+        headers=BEARER,
+        data={"title": "Review", "state": "進行中", "waiting_on": "Client"},
+    )
+    assert response.status_code == 303
+    assert "error" not in response.headers["location"]
+    saved = await tasks.get(task.id)
+    assert saved is not None and saved.state == "進行中" and saved.waiting_on is None
+
+
+async def test_project_page_groups_open_tasks_by_phase(
+    client: httpx.AsyncClient, tasks: TaskStore, pool: asyncpg.Pool
+):
+    await MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1).remember(
+        name="demo-overview",
+        description="demo project overview",
+        content="Status.",
+        type="project",
+        source_app="test",
+        allow_duplicate=True,
+    )
+    await tasks.add(title="Later work", project="demo", phase="07 Testing")
+    await tasks.add(title="Early work", project="demo", phase="04 Design", state="等待中")
+    await tasks.add(title="Loose work", project="demo")
+
+    page = (await client.get("/app/projects/demo", headers=BEARER)).text
+    assert page.index("04 Design") < page.index("07 Testing") < page.index("未分階段")
+    assert "目前階段 04 Design" in page and "1 件等別人" in page
+
+    assert "目前階段 04 Design" in (await client.get("/app/projects", headers=BEARER)).text
+
+
+async def test_project_page_without_phases_stays_one_list(
+    client: httpx.AsyncClient, tasks: TaskStore, pool: asyncpg.Pool
+):
+    await tasks.add(title="Loose")
+    page = (await client.get("/app/projects/-", headers=BEARER)).text
+    assert "<h2>未完成" in page and "未分階段" not in page
+
+
+async def test_states_page_adds_renames_and_deletes(client: httpx.AsyncClient, tasks: TaskStore):
+    page = await client.get("/app/states?from=/app/me", headers=BEARER)
+    assert page.status_code == 200 and "遭阻擋" in page.text
+
+    await client.post("/app/states/save", headers=BEARER, data={"name": "等簽核", "waiting": "on"})
+    await client.post(
+        "/app/states/save",
+        headers=BEARER,
+        data={"name": "等核准", "rename": "等簽核", "waiting": "on"},
+    )
+    assert {"name": "等核准", "waiting": True} in [s.model_dump() for s in await tasks.states()]
+
+    task = await tasks.add(title="Sign-off", state="等核准")
+    refused = await client.post(
+        "/app/states/delete",
+        headers=BEARER,
+        data={"name": "等核准", "next": "/app/states"},
+    )
+    assert "error=" in refused.headers["location"]
+
+    await tasks.drop(task.id)
+    await client.post("/app/states/delete", headers=BEARER, data={"name": "等核准"})
+    assert "等核准" not in [s.name for s in await tasks.states()]
+
+
+async def test_states_pages_require_auth(client: httpx.AsyncClient):
+    assert (await client.get("/app/states")).status_code == 303
+    response = await client.post("/app/states/save", data={"name": "Sneaky"})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/app/login"

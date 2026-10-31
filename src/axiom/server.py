@@ -465,7 +465,7 @@ def _task_payload(task) -> dict:
 @mcp.tool
 async def task(
     action: Annotated[
-        Literal["add", "update", "done", "drop", "confirm", "reject", "defer", "list"],
+        Literal["add", "update", "done", "drop", "confirm", "reject", "defer", "list", "states"],
         Field(description="What to do; see the tool description."),
     ],
     id: Annotated[
@@ -521,7 +521,42 @@ async def task(
     ] = None,
     clear: Annotated[
         list[str] | None,
-        Field(description="update only: fields to blank out — project, due_date, planned_date."),
+        Field(
+            description=(
+                "update only: fields to blank out — project, due_date, planned_date, "
+                "state, waiting_on, phase, code."
+            )
+        ),
+    ] = None,
+    state: Annotated[
+        str | None,
+        Field(
+            description=(
+                "add/update: where the task stands, one of the names from action "
+                "'states'. Optional; leave it out of ordinary to-dos."
+            )
+        ),
+    ] = None,
+    waiting_on: Annotated[
+        str | None,
+        Field(
+            max_length=100,
+            description="add/update: who or what it waits on; needs a state that waits.",
+        ),
+    ] = None,
+    phase: Annotated[
+        str | None,
+        Field(
+            max_length=40,
+            description=(
+                "add/update: delivery phase, e.g. '07 測試與安全驗證'. Reuse the exact "
+                "name other tasks in the project use."
+            ),
+        ),
+    ] = None,
+    code: Annotated[
+        str | None,
+        Field(max_length=20, description="add/update: WBS number, e.g. 'AG-6.2'."),
     ] = None,
     status: Annotated[
         list[Literal["suggested", "open", "done", "dropped", "expired"]] | None,
@@ -549,19 +584,25 @@ async def task(
       look-alikes of open tasks or recently rejected ones; a refusal is final
       for today — do not rephrase and retry. Unanswered suggestions expire
       after 5 days.
-    - update: change title / project / dates (pass `clear` to blank a field).
+    - update: change title / project / dates / state / phase (pass `clear` to
+      blank a field).
+    - states: the state names the user keeps. When a task is held by someone
+      else, set a state with waiting=true plus waiting_on; it then cannot go
+      overdue, and planned_date is the day to follow up.
     - done / drop: finished, or no longer wanted.
     - confirm / reject: the user's answer to a suggestion (reject with their
       reason, so the same idea is not proposed again).
     - defer: move an open task to 'tomorrow', a date, or 'someday'.
     - list: with no filters, what needs a look today — overdue, planned or due
       today, unscheduled (open with no day and not someday — aim to give each
-      a day), and suggestions awaiting an answer — plus how many open tasks are
-      already arranged for later. With project / status / date filters, a flat
-      list.
+      a day), and suggestions awaiting an answer — plus what is waiting on
+      someone else and how many open tasks are already arranged for later.
+      With project / status / date filters, a flat list.
     """
     tasks = await get_tasks()
     try:
+        if action == "states":
+            return {"states": [s.model_dump() for s in await tasks.states()]}
         if action == "list":
             if project or status or date_from or date_to:
                 found = await tasks.find(
@@ -575,6 +616,7 @@ async def task(
                 "due_today": [_task_payload(t) for t in view.due_today],
                 "unscheduled": [_task_payload(t) for t in view.unscheduled],
                 "suggested": [_task_payload(t) for t in view.suggested],
+                "waiting": [_task_payload(t) for t in view.waiting],
                 "arranged_for_later": view.arranged,
             }
         if action == "add":
@@ -588,6 +630,10 @@ async def task(
                 planned_date=planned_date,
                 someday=bool(someday),
                 evidence=evidence,
+                state=state,
+                waiting_on=waiting_on,
+                phase=phase,
+                code=code,
             )
             return {"status": created.status, "task": _task_payload(created)}
         if id is None:
@@ -600,6 +646,10 @@ async def task(
                 due_date=due_date,
                 planned_date=planned_date,
                 someday=someday,
+                state=state,
+                waiting_on=waiting_on,
+                phase=phase,
+                code=code,
                 clear=clear,
             )
         elif action == "done":

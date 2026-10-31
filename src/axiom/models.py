@@ -213,6 +213,14 @@ class TaskEvidence(BaseModel):
     note: str | None = None
 
 
+class TaskState(BaseModel):
+    """The user's word for where an open task stands. `waiting` means someone
+    else holds it, so it cannot be overdue."""
+
+    name: str
+    waiting: bool = False
+
+
 class Task(BaseModel):
     id: int
     title: str
@@ -223,6 +231,11 @@ class Task(BaseModel):
     planned_date: date | None = None
     someday: bool = False
     defer_count: int = 0
+    state: str | None = None
+    waiting: bool = False
+    waiting_on: str | None = None
+    phase: str | None = None
+    code: str | None = None
     evidence: TaskEvidence | None = None
     reject_reason: str | None = None
     done_at: datetime | None = None

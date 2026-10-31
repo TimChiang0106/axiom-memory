@@ -56,7 +56,9 @@ mirror.
   with a planned day, a deadline, or "someday", not in overview prose. AI
   suggestions are allowed but rationed server-side: each needs a fixed
   trigger and cited memories, at most a few a day, look-alikes of open tasks
-  or recent rejections are refused, and unanswered ones expire.
+  or recent rejections are refused, and unanswered ones expire. Delivery work
+  can carry a phase, a WBS number, and a state from a list you keep yourself;
+  a state marked as waiting stays out of overdue until its follow-up day.
 - **Documents** — long text (specs, plans, notes) goes in `document`:
   fetched by name, versioned, never part of recall. A memory points at one
   with `doc:<name>`.

@@ -48,6 +48,9 @@ I use "axiom" (MCP) as my long-term memory, shared across all my AI apps.
   `add`, source `stated`) right away; set `planned_date` if I said which day,
   `due_date` for a deadline, `someday` for "later". Only propose a task I
   didn't ask for with source `ai_suggested`, citing the memories it comes from.
+  When a task is held by someone else, `task` update it with a waiting state
+  (action `states` lists them) and `waiting_on`; `planned_date` is then the day
+  to follow up. Project work can carry `phase` and `code` (WBS number).
   Long documents (specs, plans, notes) go in `document`, not in a memory; a
   memory can point at one with `doc:<name>`.
 - Treat a job or client engagement like a project: give it an overview, and

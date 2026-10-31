@@ -326,3 +326,136 @@ def test_later_this_week_falls_back_to_next_week():
     saturday = date(2026, 10, 24)
     days = later_this_week(saturday)
     assert days[0] == date(2026, 10, 26) and days[-1] == date(2026, 11, 1)
+
+
+# -- states, phases ------------------------------------------------------------
+
+
+async def test_waiting_task_is_never_overdue(tasks: TaskStore):
+    today = await tasks.today()
+    held = await tasks.add(
+        title="Training date",
+        state="等待中",
+        waiting_on="Client",
+        due_date=today - timedelta(days=3),
+    )
+    assert held.waiting and held.waiting_on == "Client"
+
+    view = await tasks.today_view()
+    assert view.overdue == []
+    assert [t.id for t in view.waiting] == [held.id]
+
+
+async def test_waiting_task_comes_up_on_its_follow_up_day(tasks: TaskStore):
+    today = await tasks.today()
+    later = await tasks.add(title="Later", state="等待中", planned_date=today + timedelta(days=2))
+    due = await tasks.add(title="Today", state="等待中", planned_date=today)
+    missed = await tasks.add(title="Missed", state="遭阻擋", planned_date=today - timedelta(days=1))
+
+    view = await tasks.today_view()
+    assert [t.id for t in view.waiting] == [later.id]
+    assert {t.id for t in view.due_today} == {due.id, missed.id}
+    assert view.overdue == []
+    assert view.arranged == 0
+
+
+async def test_state_that_does_not_wait_keeps_normal_rules(tasks: TaskStore):
+    today = await tasks.today()
+    task = await tasks.add(
+        title="Check results", state="待驗證", planned_date=today - timedelta(days=1)
+    )
+    assert not task.waiting
+    assert [t.id for t in (await tasks.today_view()).overdue] == [task.id]
+
+
+async def test_state_must_be_known_and_waiting_on_needs_a_waiting_state(tasks: TaskStore):
+    with pytest.raises(TaskError) as err:
+        await tasks.add(title="Nope", state="等客戶")
+    assert "等待中" in err.value.detail["known_states"]
+
+    with pytest.raises(TaskError) as err:
+        await tasks.add(title="Nope", state="進行中", waiting_on="Client")
+    assert err.value.detail["waiting_states"] == ["遭阻擋", "等待中"]
+
+    task = await tasks.add(title="Plain")
+    with pytest.raises(TaskError):
+        await tasks.update(task.id, waiting_on="Client")
+
+
+async def test_leaving_a_waiting_state_drops_who_it_waited_on(tasks: TaskStore):
+    task = await tasks.add(title="Review", state="等待中", waiting_on="Client")
+    assert (await tasks.update(task.id, title="Review v2")).waiting_on == "Client"
+
+    moved = await tasks.update(task.id, state="進行中")
+    assert moved.state == "進行中"
+    assert moved.waiting_on is None and not moved.waiting
+
+    back = await tasks.update(task.id, state="遭阻擋", waiting_on="Vendor")
+    assert back.waiting_on == "Vendor"
+    cleared = await tasks.update(task.id, clear=["state"])
+    assert cleared.state is None and cleared.waiting_on is None
+
+
+async def test_following_up_later_is_not_a_deferral(tasks: TaskStore):
+    today = await tasks.today()
+    task = await tasks.add(title="Chase", state="等待中", planned_date=today)
+    pushed = await tasks.defer(task.id, to=today + timedelta(days=3))
+    assert pushed.defer_count == 0
+
+
+async def test_phase_and_code_update_and_clear(tasks: TaskStore):
+    task = await tasks.add(title="DLP check", phase=" 07 Testing ", code="AG-6.2")
+    assert (task.phase, task.code) == ("07 Testing", "AG-6.2")
+    assert await tasks.phases(None) == ["07 Testing"]
+
+    cleared = await tasks.update(task.id, clear=["phase", "code"])
+    assert cleared.phase is None and cleared.code is None
+
+    with pytest.raises(TaskError):
+        await tasks.update(task.id, phase="x" * 41)
+
+
+async def test_states_can_be_added_renamed_and_removed(tasks: TaskStore):
+    added = await tasks.save_state(" 等簽核 ", waiting=True)
+    assert added.name == "等簽核"
+    assert (await tasks.states())[-1] == added
+
+    task = await tasks.add(title="Sign-off", state="等簽核", waiting_on="Legal")
+    await tasks.save_state("等核准", waiting=True, rename="等簽核")
+    renamed = await tasks.get(task.id)
+    assert renamed is not None and renamed.state == "等核准"
+
+    with pytest.raises(TaskError):
+        await tasks.save_state("等待中")
+    with pytest.raises(TaskError):
+        await tasks.save_state("等核准", rename="沒有這個")
+
+    with pytest.raises(TaskError):
+        await tasks.delete_state("等核准")
+    await tasks.done(task.id)
+    await tasks.delete_state("等核准")
+    assert "等核准" not in [s.name for s in await tasks.states()]
+    finished = await tasks.get(task.id)
+    assert finished is not None and finished.state is None
+
+
+async def test_turning_a_state_into_waiting_applies_to_its_tasks(tasks: TaskStore):
+    today = await tasks.today()
+    await tasks.save_state("外包中")
+    task = await tasks.add(title="Outsourced", state="外包中", due_date=today - timedelta(days=1))
+    assert [t.id for t in (await tasks.today_view()).overdue] == [task.id]
+
+    await tasks.save_state("外包中", waiting=True, rename="外包中")
+    assert [t.id for t in (await tasks.today_view()).waiting] == [task.id]
+
+
+async def test_project_stats_show_current_phase_and_waiting(tasks: TaskStore, pool: asyncpg.Pool):
+    await _overview(pool)
+    finished = await tasks.add(title="Scope", project="axiom", phase="01 Discovery")
+    await tasks.done(finished.id)
+    await tasks.add(title="Design", project="axiom", phase="04 Design", state="等待中")
+    await tasks.add(title="Build", project="axiom", phase="05 Build")
+
+    stats = (await tasks.project_stats())["axiom"]
+    assert stats.phase == "04 Design"
+    assert stats.waiting == 1

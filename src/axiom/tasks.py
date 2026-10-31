@@ -21,7 +21,7 @@ from typing import Any, Literal
 import asyncpg
 
 from axiom.embeddings import GeminiEmbedder, to_pgvector
-from axiom.models import SuggestionTrigger, Task, TaskSource, TaskStatus
+from axiom.models import SuggestionTrigger, Task, TaskSource, TaskState, TaskStatus
 
 ALLOWED_TRIGGERS: tuple[SuggestionTrigger, ...] = (
     "unrecorded_commitment",
@@ -33,11 +33,17 @@ _OVERVIEW_SUFFIX = "-overview"
 
 _COLUMNS = (
     "id, title, project, status, source, due_date, planned_date, someday, defer_count, "
-    "evidence, reject_reason, done_at, created_at, updated_at, expires_at"
+    "evidence, reject_reason, done_at, created_at, updated_at, expires_at, "
+    "state, waiting_on, phase, code, "
+    "COALESCE((SELECT s.waiting FROM task_states s WHERE s.name = state), false) AS waiting"
 )
 
 # Fields `update` can clear via its `clear` list.
-CLEARABLE = ("project", "due_date", "planned_date")
+CLEARABLE = ("project", "due_date", "planned_date", "state", "waiting_on", "phase", "code")
+
+# Free-text limits, matching the column checks.
+_TEXT_LIMITS = {"waiting_on": 100, "phase": 40, "code": 20}
+_STATE_NAME_LIMIT = 20
 
 
 class TaskError(ValueError):
@@ -47,6 +53,14 @@ class TaskError(ValueError):
     def __init__(self, message: str, **detail: Any):
         super().__init__(message)
         self.detail = detail
+
+
+def _clean(field_name: str, value: str | None) -> str | None:
+    value = (value or "").strip()
+    limit = _TEXT_LIMITS[field_name]
+    if len(value) > limit:
+        raise TaskError(f"{field_name} is longer than {limit} characters.")
+    return value or None
 
 
 @dataclass
@@ -61,6 +75,8 @@ class TodayView:
     # Open tasks already arranged for a later day or parked as someday —
     # the "you don't have to think about these" count.
     arranged: int = 0
+    # Held by someone else, and not yet the day to follow up.
+    waiting: list[Task] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +94,9 @@ class ProjectStats:
     done_this_week: int = 0
     done_total: int = 0
     next_due: date | None = None
+    waiting: int = 0
+    # The earliest phase that still has open tasks.
+    phase: str | None = None
     # Open tasks untouched long enough to ask whether they still matter.
     stale_open: list[Task] = field(default_factory=list)
 
@@ -155,6 +174,77 @@ class TaskStore:
                 known_projects=known,
             )
 
+    async def phases(self, project: str | None) -> list[str]:
+        rows = await self._pool.fetch(
+            "SELECT DISTINCT phase FROM tasks WHERE project IS NOT DISTINCT FROM $1 "
+            "AND phase IS NOT NULL ORDER BY phase",
+            project,
+        )
+        return [r["phase"] for r in rows]
+
+    async def states(self) -> list[TaskState]:
+        rows = await self._pool.fetch(
+            "SELECT name, waiting FROM task_states ORDER BY position, name"
+        )
+        return [TaskState(name=r["name"], waiting=r["waiting"]) for r in rows]
+
+    async def save_state(
+        self, name: str, *, waiting: bool = False, rename: str | None = None
+    ) -> TaskState:
+        """Add a state, or change the one called `rename`; tasks follow the
+        new name."""
+        name = name.strip()
+        if not 1 <= len(name) <= _STATE_NAME_LIMIT:
+            raise TaskError(f"A state name is 1 to {_STATE_NAME_LIMIT} characters.")
+        try:
+            if rename is None:
+                await self._pool.execute(
+                    "INSERT INTO task_states (name, waiting, position) "
+                    "SELECT $1, $2, COALESCE(max(position), 0) + 1 FROM task_states",
+                    name,
+                    waiting,
+                )
+            elif (
+                await self._pool.fetchval(
+                    "UPDATE task_states SET name = $2, waiting = $3 WHERE name = $1 RETURNING name",
+                    rename,
+                    name,
+                    waiting,
+                )
+                is None
+            ):
+                raise TaskError(f"No state named '{rename}'.")
+        except asyncpg.UniqueViolationError:
+            raise TaskError(f"State '{name}' already exists.") from None
+        return TaskState(name=name, waiting=waiting)
+
+    async def delete_state(self, name: str) -> None:
+        """Finished tasks just lose the word; a live task would silently
+        change meaning, so its state has to be moved first."""
+        live = await self._pool.fetchval(
+            "SELECT count(*) FROM tasks WHERE state = $1 AND status IN ('open', 'suggested')",
+            name,
+        )
+        if live:
+            raise TaskError(f"{live} open task(s) are in '{name}'; move them first.")
+        await self._pool.execute("DELETE FROM task_states WHERE name = $1", name)
+
+    async def _waiting_on(
+        self, state: str | None, waiting_on: str | None, *, kept: str | None = None
+    ) -> str | None:
+        """Check `state` and work out who the task waits on: that only means
+        something while the state waits, so moving out of one drops it."""
+        states = await self.states()
+        if state is not None and state not in {s.name for s in states}:
+            raise TaskError(f"No state named '{state}'.", known_states=[s.name for s in states])
+        waits = any(s.waiting and s.name == state for s in states)
+        if waiting_on and not waits:
+            raise TaskError(
+                "waiting_on needs a state that waits.",
+                waiting_states=[s.name for s in states if s.waiting],
+            )
+        return (waiting_on or kept) if waits else None
+
     async def _embed(self, title: str) -> str | None:
         if self._embedder is None:
             return None
@@ -189,6 +279,10 @@ class TaskStore:
         planned_date: date | None = None,
         someday: bool = False,
         evidence: dict | None = None,
+        state: str | None = None,
+        waiting_on: str | None = None,
+        phase: str | None = None,
+        code: str | None = None,
     ) -> Task:
         title = title.strip()
         if not title:
@@ -196,6 +290,9 @@ class TaskStore:
         if someday and planned_date is not None:
             raise TaskError("A task is either planned for a day or someday, not both.")
         await self._check_project(project)
+        waiting_on = await self._waiting_on(state, _clean("waiting_on", waiting_on))
+        phase = _clean("phase", phase)
+        code = _clean("code", code)
         embedding = await self._embed(title)
 
         if source == "ai_suggested":
@@ -207,11 +304,11 @@ class TaskStore:
         row = await self._pool.fetchrow(
             f"""
             INSERT INTO tasks (title, project, status, source, due_date, planned_date, someday,
-                               evidence, expires_at, embedding)
+                               evidence, expires_at, embedding, state, waiting_on, phase, code)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb,
                     CASE WHEN $4 = 'ai_suggested'
                          THEN now() + make_interval(days => $9::int) END,
-                    $10::vector)
+                    $10::vector, $11, $12, $13, $14)
             RETURNING {_COLUMNS}
             """,
             title,
@@ -224,6 +321,10 @@ class TaskStore:
             json.dumps(evidence, ensure_ascii=False) if evidence else None,
             self._suggestion_ttl_days,
             embedding,
+            state,
+            waiting_on,
+            phase,
+            code,
         )
         assert row is not None
         return Task.from_row(row)
@@ -323,7 +424,10 @@ class TaskStore:
     ) -> bool:
         """Whether a new plan moves the task back. Scheduling an unplanned
         task for the first time is planning, not deferring; moving a planned
-        (or due-now) task to a later day or to someday is a deferral."""
+        (or due-now) task to a later day or to someday is a deferral. Waiting
+        longer on someone else is not the user putting it off."""
+        if task.waiting:
+            return False
         anchor = task.planned_date
         if anchor is None and task.due_date is not None and task.due_date <= today:
             anchor = task.due_date
@@ -340,6 +444,10 @@ class TaskStore:
         due_date: date | None = None,
         planned_date: date | None = None,
         someday: bool | None = None,
+        state: str | None = None,
+        waiting_on: str | None = None,
+        phase: str | None = None,
+        code: str | None = None,
         clear: list[str] | None = None,
     ) -> Task:
         task = await self._require(task_id, "open", "suggested")
@@ -355,6 +463,14 @@ class TaskStore:
             raise TaskError("Title is empty.")
         new_project = None if "project" in clear else (project or task.project)
         new_due = None if "due_date" in clear else (due_date or task.due_date)
+        new_state = None if "state" in clear else (state or task.state)
+        new_waiting_on = await self._waiting_on(
+            new_state,
+            _clean("waiting_on", waiting_on),
+            kept=None if "waiting_on" in clear else task.waiting_on,
+        )
+        new_phase = None if "phase" in clear else (_clean("phase", phase) or task.phase)
+        new_code = None if "code" in clear else (_clean("code", code) or task.code)
         if planned_date is not None:
             new_planned, new_someday = planned_date, False
         elif someday:
@@ -372,6 +488,7 @@ class TaskStore:
             UPDATE tasks SET title = $2, project = $3, due_date = $4, planned_date = $5,
                    someday = $6, defer_count = defer_count + $7::int,
                    embedding = CASE WHEN $8 THEN $9::vector ELSE embedding END,
+                   state = $10, waiting_on = $11, phase = $12, code = $13,
                    updated_at = now()
             WHERE id = $1
             RETURNING {_COLUMNS}
@@ -385,6 +502,10 @@ class TaskStore:
             1 if bump else 0,
             new_title != task.title,
             embedding,
+            new_state,
+            new_waiting_on,
+            new_phase,
+            new_code,
         )
         assert row is not None
         return Task.from_row(row)
@@ -515,7 +636,9 @@ class TaskStore:
     async def today_view(self) -> TodayView:
         """Partition every open task: overdue, today, unscheduled, or already
         arranged (a later day, or someday). A task re-planned for a later day
-        leaves "overdue" even past its deadline — the user decided when."""
+        leaves "overdue" even past its deadline — the user decided when. A
+        waiting task is never overdue: it stays apart until its follow-up day,
+        then comes up today."""
         await self.expire_suggestions()
         today = await self.today()
         rows = await self._pool.fetch(
@@ -526,6 +649,11 @@ class TaskStore:
         for task in map(Task.from_row, rows):
             if task.status == "suggested":
                 view.suggested.append(task)
+            elif task.waiting:
+                if task.planned_date is not None and task.planned_date <= today:
+                    view.due_today.append(task)
+                else:
+                    view.waiting.append(task)
             elif task.planned_date is not None:
                 if task.planned_date < today:
                     view.overdue.append(task)
@@ -590,7 +718,10 @@ class TaskStore:
                    count(*) FILTER (WHERE status = 'done'
                                     AND (done_at AT TIME ZONE $2)::date >= $1) AS done_this_week,
                    count(*) FILTER (WHERE status = 'done') AS done_total,
-                   min(due_date) FILTER (WHERE status = 'open') AS next_due
+                   min(due_date) FILTER (WHERE status = 'open') AS next_due,
+                   count(*) FILTER (WHERE status = 'open' AND state IN (
+                       SELECT name FROM task_states WHERE waiting)) AS waiting,
+                   min(phase) FILTER (WHERE status = 'open') AS phase
             FROM tasks GROUP BY project
             """,
             monday,
@@ -603,6 +734,8 @@ class TaskStore:
                 done_this_week=r["done_this_week"],
                 done_total=r["done_total"],
                 next_due=r["next_due"],
+                waiting=r["waiting"],
+                phase=r["phase"],
             )
             for r in rows
         }

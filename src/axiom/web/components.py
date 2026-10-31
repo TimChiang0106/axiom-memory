@@ -9,7 +9,7 @@ from datetime import date, timedelta
 from html import escape
 from urllib.parse import quote, urlencode
 
-from axiom.models import MemorySummary, ReviewReport, Task
+from axiom.models import MemorySummary, ReviewReport, Task, TaskState
 from axiom.tasks import ProjectStats, later_this_week
 from axiom.web.labels import (
     APP_LABELS,
@@ -84,12 +84,18 @@ def meta_text(
     so a planned date equal to it is left out; `in_project` likewise drops
     the project name on that project's own page."""
     parts = []
+    if task.code:
+        parts.append(escape(task.code))
     if task.project and not in_project:
         parts.append(escape(task.project))
+    if task.state and task.status in ("open", "suggested"):
+        parts.append(escape(task.state))
+    if task.waiting and task.waiting_on:
+        parts.append(f"等 {escape(task.waiting_on)}")
     if task.planned_date and task.planned_date == section_day:
         pass
     elif task.planned_date:
-        parts.append(f"計畫 {day(task.planned_date, today)}")
+        parts.append(f"{'追蹤' if task.waiting else '計畫'} {day(task.planned_date, today)}")
     elif task.someday:
         parts.append("之後再說")
     if task.due_date:
@@ -255,6 +261,45 @@ def project_options(projects: list[str], selected: str | None, *, none_label: st
     return "".join(options)
 
 
+def state_options(states: list[TaskState], selected: str | None) -> str:
+    options = ['<option value="">不設定</option>']
+    for s in states:
+        sel = " selected" if s.name == selected else ""
+        options.append(f'<option value="{escape(s.name)}"{sel}>{escape(s.name)}</option>')
+    return "".join(options)
+
+
+def state_row(state: TaskState, *, back: str) -> str:
+    checked = " checked" if state.waiting else ""
+    return (
+        '<div class="row states">'
+        '<form method="post" action="/app/states/save">'
+        f'<input type="hidden" name="next" value="{escape(back)}">'
+        f'<input type="hidden" name="rename" value="{escape(state.name)}">'
+        f'<input type="text" name="name" required maxlength="20" aria-label="狀態名稱" '
+        f'value="{escape(state.name)}">'
+        f'<label><input type="checkbox" name="waiting"{checked}>等別人</label>'
+        "<button>儲存</button></form>"
+        '<form method="post" action="/app/states/delete" '
+        "onsubmit=\"return confirm('刪除這個狀態？')\">"
+        f'<input type="hidden" name="next" value="{escape(back)}">'
+        f'<input type="hidden" name="name" value="{escape(state.name)}">'
+        '<button class="quiet">刪除</button></form></div>'
+    )
+
+
+def new_state_row(*, back: str) -> str:
+    return (
+        '<div class="row states">'
+        '<form method="post" action="/app/states/save">'
+        f'<input type="hidden" name="next" value="{escape(back)}">'
+        '<input type="text" name="name" required maxlength="20" placeholder="新增狀態" '
+        'aria-label="新增狀態">'
+        '<label><input type="checkbox" name="waiting">等別人</label>'
+        '<button class="primary">新增</button></form></div>'
+    )
+
+
 def quick_add(projects: list[str]) -> str:
     whens = [("today", "今天"), ("tomorrow", "明天"), ("someday", "之後"), ("none", "不排日期")]
     seg = "".join(
@@ -283,13 +328,24 @@ def metrics(s: ProjectStats | None) -> str:
         + "".join(
             f'<div><span class="n">{n}</span><span class="l">{label}</span></div>'
             for n, label in (
-                (s.open if s else 0, "進行中"),
+                (s.open if s else 0, "未完成"),
                 (s.done_this_week if s else 0, "本週完成"),
                 (s.done_total if s else 0, "總完成"),
             )
         )
         + "</div>"
     )
+
+
+def progress(s: ProjectStats | None) -> str:
+    """Where a project stands: its earliest unfinished phase, and how much of
+    it is out of the user's hands."""
+    parts = []
+    if s and s.phase:
+        parts.append(f"目前階段 {escape(s.phase)}")
+    if s and s.waiting:
+        parts.append(f"{s.waiting} 件等別人")
+    return f'<div class="meta">{"・".join(parts)}</div>' if parts else ""
 
 
 def inline_md(text: str) -> str:

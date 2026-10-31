@@ -794,6 +794,34 @@ input[type=date] {
   min-width: 0;
 }
 
+.states {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.states form:first-child {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.states input[type=text] {
+  flex: 1;
+  min-width: 96px;
+}
+
+.states label {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 14px;
+  color: var(--dim);
+}
+
 .search {
   display: flex;
   gap: 8px;
