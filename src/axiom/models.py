@@ -225,6 +225,7 @@ class Task(BaseModel):
     id: int
     title: str
     project: str | None = None
+    project_name: str | None = None
     status: TaskStatus
     source: TaskSource
     due_date: date | None = None
@@ -242,6 +243,10 @@ class Task(BaseModel):
     created_at: datetime
     updated_at: datetime
     expires_at: datetime | None = None
+
+    @property
+    def project_label(self) -> str | None:
+        return self.project_name or self.project
 
     @classmethod
     def from_row(cls, row: asyncpg.Record) -> "Task":

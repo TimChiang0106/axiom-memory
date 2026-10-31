@@ -39,7 +39,7 @@ def routes(ctx: WebContext) -> list[Route]:
             status += f'<div class="todo">{len(view.unscheduled)} 件還沒安排</div>'
         body = f'<div class="summary">{status}</div>'
         body += await ctx.notices(request, tasks)
-        main = ui.quick_add(await tasks.known_projects())
+        main = ui.quick_add(await tasks.project_names())
         bulk = ""
         if len(view.overdue) >= 2:
             bulk = (
@@ -109,7 +109,7 @@ def routes(ctx: WebContext) -> list[Route]:
         body += f'<div class="list week">{"".join(cols)}</div>'
         groups: dict[str, list[Task]] = {}
         for t in view.done:
-            groups.setdefault(t.project or "未分專案", []).append(t)
+            groups.setdefault(t.project_label or "未分專案", []).append(t)
         rows = [
             f'<div class="row"><div class="title">{escape(project)}'
             f' <span class="tag">{len(items)}</span></div>'
@@ -130,10 +130,11 @@ def routes(ctx: WebContext) -> list[Route]:
         overviews = await memories.overviews()
         drifted = {d.name: d for d in await memories.drifted_overviews()}
         orphans = await memories.orphans()
+        labels = await tasks.project_names()
 
         def card(project: str | None, overview: Memory | None) -> str:
             s = stats.get(project)
-            name = project or "未分專案"
+            name = labels.get(project or "", project or "未分專案")
             due = (
                 f'<div class="meta">最近截止 {ui.day(s.next_due, today)}</div>'
                 if s and s.next_due
@@ -200,6 +201,7 @@ def routes(ctx: WebContext) -> list[Route]:
         if project and overview is None and project not in stats:
             return page("找不到", "projects", '<div class="empty">找不到這個專案。</div>')
         back = ctx.here(request)
+        name = (await tasks.project_names()).get(project or "", project or "未分專案")
 
         found = await tasks.find(project=project, statuses=["open", "suggested", "done"])
         if project is None:
@@ -212,7 +214,7 @@ def routes(ctx: WebContext) -> list[Route]:
             reverse=True,
         )[:10]
         body = '<a class="back" href="/app/projects">‹ 專案</a>'
-        body += f"<h1>{escape(project or '未分專案')}</h1>"
+        body += f"<h1>{escape(name)}</h1>"
         body += await ctx.notices(request, tasks)
         s = stats.get(project)
         body += (
@@ -259,7 +261,7 @@ def routes(ctx: WebContext) -> list[Route]:
                 ],
             )
         body += ui.split(main, side)
-        return page(project or "未分專案", "projects", body)
+        return page(name, "projects", body)
 
     async def task_page(request: Request) -> Response:
         if (denied := await ctx.guard(request)) is not None:
@@ -271,7 +273,7 @@ def routes(ctx: WebContext) -> list[Route]:
         if task is None:
             return page("找不到", "", top + '<div class="empty">找不到這件事。</div>')
         today = await tasks.today()
-        projects = await tasks.known_projects()
+        projects = await tasks.project_names()
         body = (
             f"{top}<h1>{escape(task.title)}</h1>"
             f'<div class="tags"><span class="tag">{STATUS_LABELS.get(task.status, task.status)}'

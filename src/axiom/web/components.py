@@ -86,8 +86,8 @@ def meta_text(
     parts = []
     if task.code:
         parts.append(escape(task.code))
-    if task.project and not in_project:
-        parts.append(escape(task.project))
+    if task.project_label and not in_project:
+        parts.append(escape(task.project_label))
     if task.state and task.status in ("open", "suggested"):
         parts.append(escape(task.state))
     if task.waiting and task.waiting_on:
@@ -253,11 +253,11 @@ def split(left: str, right: str) -> str:
     return f'<div class="split"><div>{left}</div><div>{right}</div></div>'
 
 
-def project_options(projects: list[str], selected: str | None, *, none_label: str) -> str:
+def project_options(projects: dict[str, str], selected: str | None, *, none_label: str) -> str:
     options = [f'<option value="">{none_label}</option>']
-    for p in projects:
+    for p, name in projects.items():
         sel = " selected" if p == selected else ""
-        options.append(f'<option value="{escape(p)}"{sel}>{escape(p)}</option>')
+        options.append(f'<option value="{escape(p)}"{sel}>{escape(name)}</option>')
     return "".join(options)
 
 
@@ -300,7 +300,7 @@ def new_state_row(*, back: str) -> str:
     )
 
 
-def quick_add(projects: list[str]) -> str:
+def quick_add(projects: dict[str, str]) -> str:
     whens = [("today", "今天"), ("tomorrow", "明天"), ("someday", "之後"), ("none", "不排日期")]
     seg = "".join(
         f'<label><input type="radio" name="when" value="{v}"{" checked" if v == "today" else ""}>'

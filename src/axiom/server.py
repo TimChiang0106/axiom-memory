@@ -151,6 +151,8 @@ mcp = FastMCP(
         "memory (status with a date, decisions in force, abandoned approaches, open "
         "items, key detail memories in `related`): `get` it first when asked where a "
         "project stands, and update it after a substantial session on that project. "
+        "Open an overview's description with '<display name> project overview': the "
+        "work page shows that name. "
         "Overviews hold no to-do lists: when the user mentions something they need "
         "to do or a deadline, `task` add it (source 'stated', with planned_date if "
         "they said which day); when they say they finished or sent one, `task` list "

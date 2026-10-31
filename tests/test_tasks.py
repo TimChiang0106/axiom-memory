@@ -459,3 +459,30 @@ async def test_project_stats_show_current_phase_and_waiting(tasks: TaskStore, po
     stats = (await tasks.project_stats())["axiom"]
     assert stats.phase == "04 Design"
     assert stats.waiting == 1
+
+
+async def test_project_name_comes_from_the_overview_description(
+    tasks: TaskStore, pool: asyncpg.Pool
+):
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    for name, description in (
+        ("acme-overview", "Acme 專案 project overview / 專案總覽 2026-11-01"),
+        ("bare-overview", "project overview / 專案總覽 no name up front"),
+    ):
+        await store.remember(
+            name=name,
+            description=description,
+            content="Status.",
+            type="project",
+            source_app="test",
+            allow_duplicate=True,
+        )
+
+    assert await tasks.project_names() == {"acme": "Acme 專案", "bare": "bare"}
+    assert await tasks.known_projects() == ["acme", "bare"]
+
+    named = await tasks.add(title="Ship", project="acme")
+    assert named.project_label == "Acme 專案"
+    unnamed = await tasks.add(title="Other", project="bare")
+    assert unnamed.project_label == "bare"
+    assert (await tasks.add(title="Loose")).project_label is None

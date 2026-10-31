@@ -30,12 +30,17 @@ ALLOWED_TRIGGERS: tuple[SuggestionTrigger, ...] = (
 )
 
 _OVERVIEW_SUFFIX = "-overview"
+# A project's display name opens its overview's description:
+# "<name> project overview / ...". NULL leaves the slug showing.
+_PROJECT_NAME = r"substring(m.description from '^(.*?)\s+project overview')"
 
 _COLUMNS = (
     "id, title, project, status, source, due_date, planned_date, someday, defer_count, "
     "evidence, reject_reason, done_at, created_at, updated_at, expires_at, "
     "state, waiting_on, phase, code, "
-    "COALESCE((SELECT s.waiting FROM task_states s WHERE s.name = state), false) AS waiting"
+    "COALESCE((SELECT s.waiting FROM task_states s WHERE s.name = state), false) AS waiting, "
+    f"(SELECT {_PROJECT_NAME} FROM memories m WHERE m.name = project || '{_OVERVIEW_SUFFIX}') "
+    "AS project_name"
 )
 
 # Fields `update` can clear via its `clear` list.
@@ -155,13 +160,17 @@ class TaskStore:
         )
         return int(result.split()[-1])
 
-    async def known_projects(self) -> list[str]:
+    async def project_names(self) -> dict[str, str]:
+        """Every known project and what to call it."""
         rows = await self._pool.fetch(
-            "SELECT left(name, length(name) - length($1)) AS project FROM memories "
-            "WHERE name LIKE '%' || $1 ORDER BY name",
+            f"SELECT left(m.name, length(m.name) - length($1)) AS project, {_PROJECT_NAME} AS name "
+            "FROM memories m WHERE m.name LIKE '%' || $1 ORDER BY m.name",
             _OVERVIEW_SUFFIX,
         )
-        return [r["project"] for r in rows]
+        return {r["project"]: r["name"] or r["project"] for r in rows}
+
+    async def known_projects(self) -> list[str]:
+        return list(await self.project_names())
 
     async def _check_project(self, project: str | None) -> None:
         if project is None:

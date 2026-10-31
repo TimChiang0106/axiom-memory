@@ -513,3 +513,30 @@ async def test_states_pages_require_auth(client: httpx.AsyncClient):
     response = await client.post("/app/states/save", data={"name": "Sneaky"})
     assert response.status_code == 303
     assert response.headers["location"] == "/app/login"
+
+
+async def test_pages_call_a_project_by_its_name(
+    client: httpx.AsyncClient, tasks: TaskStore, pool: asyncpg.Pool
+):
+    await MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1).remember(
+        name="acme-agent-overview",
+        description="Acme 客服 project overview / 專案總覽",
+        content="Status.",
+        type="project",
+        source_app="test",
+        allow_duplicate=True,
+    )
+    task = await tasks.add(title="Ship", project="acme-agent", planned_date=await tasks.today())
+
+    for path in ("/app", "/app/projects", "/app/projects/acme-agent", f"/app/tasks/{task.id}"):
+        page = (await client.get(path, headers=BEARER)).text
+        assert "Acme 客服" in page, path
+
+    assert (
+        '<option value="acme-agent">Acme 客服</option>'
+        in (await client.get("/app", headers=BEARER)).text
+    )
+    assert (
+        'href="/app/projects/acme-agent"'
+        in (await client.get("/app/projects", headers=BEARER)).text
+    )
