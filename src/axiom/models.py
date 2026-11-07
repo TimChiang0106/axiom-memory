@@ -117,6 +117,31 @@ class RememberResult(BaseModel):
     # earlier decision and rewrites it instead of silently adding a parallel
     # memory that quietly contradicts it.
     neighbors: list[MemorySummary] = []
+    # Names the memory links to — `[[name]]` in its content or an entry in
+    # `related` — that no memory carries: a typo, or a detail not written yet.
+    missing_links: list[str] = []
+    # With `supersedes`: the memories now archived in favour of this one, and
+    # the memories whose links to them were moved onto this one.
+    superseded: list[str] = []
+    relinked: list[str] = []
+
+
+class ContentEdit(BaseModel):
+    """One find-and-replace in a memory's content: `old` must occur in it
+    exactly once."""
+
+    old: str = Field(min_length=1)
+    new: str
+
+
+class EditResult(BaseModel):
+    """What `edit` reports back: enough to confirm the change without
+    echoing the whole content, which is what the edit exists to avoid."""
+
+    name: str
+    updated_at: datetime
+    chars: int
+    missing_links: list[str] = []
 
 
 class MemoryVersion(BaseModel):

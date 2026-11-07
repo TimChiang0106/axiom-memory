@@ -22,6 +22,8 @@ from axiom.embeddings import GeminiEmbedder
 from axiom.models import (
     NAME_PATTERN,
     Category,
+    ContentEdit,
+    EditResult,
     MemorySummary,
     MemoryType,
     MemoryVersion,
@@ -147,8 +149,10 @@ mcp = FastMCP(
         "their preferences, ongoing projects, contacts, or past decisions. Call `remember` "
         "when the user states a durable fact, preference, or decision — store one "
         "curated fact per memory, never conversation logs, and give it a short "
-        "`title` in the user's language beside its slug `name`; when one is superseded "
-        "but worth keeping as history, re-remember it with archived=true. Call `log_event` for "
+        "`title` in the user's language beside its slug `name`; when a new memory "
+        "replaces one, name the old one in `supersedes` so it is archived and links to "
+        "it move to the new one. To fix part of a memory, `edit` it instead of "
+        "re-sending the whole content with `remember`. Call `log_event` for "
         "weak ambient signals (what they asked about or did) that aren't worth a "
         "curated memory yet. Each ongoing project keeps one `<project>-overview` "
         "memory (status with a date, decisions in force, abandoned approaches, open "
@@ -236,19 +240,20 @@ async def remember(
                 "'people' (colleagues, clients, collaborators, relationships), "
                 "'areas' (long-term projects, products, companies, ventures), "
                 "'topics' (domain expertise, workflows, guidelines, investing, technical stacks). "
-                "Optional; if omitted, automatically inferred from type."
+                "Optional; if omitted, inferred from type on create and kept on update."
             )
         ),
     ] = None,
     related: Annotated[
-        list[str],
+        list[str] | None,
         Field(
             description=(
                 "Names of related memories to link to, so recall can point onward "
-                "to them. Optional; use the exact names of existing memories."
+                "to them. Optional; use the exact names of existing memories. Omit on "
+                "update to keep the current links; pass [] to clear them."
             )
         ),
-    ] = [],  # noqa: B006 — FastMCP reads the default to build the schema.
+    ] = None,
     provenance: Annotated[
         Provenance | None,
         Field(
@@ -271,6 +276,17 @@ async def remember(
             )
         ),
     ] = False,
+    supersedes: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Names of existing memories this one replaces, e.g. a renamed memory's "
+                "old name or a decision this one overturns. Each is archived (kept as "
+                "history, left out of recall) and every link to it in other memories "
+                "moves to this one."
+            )
+        ),
+    ] = [],  # noqa: B006 — FastMCP reads the default to build the schema.
 ) -> RememberResult:
     """Save or update one memory.
 
@@ -284,23 +300,69 @@ async def remember(
     duplicates, but check them — if the new fact revises or contradicts one
     (e.g. a project overview or plan it supersedes), update that memory by its
     name instead of leaving two records that disagree.
+
+    `missing_links` lists names this memory links to (`[[name]]` in content,
+    or `related`) that no memory carries — fix a typo or a renamed target, or
+    write the missing memory next.
     """
     store = await get_store()
     if not title.strip() and await store.get(name) is None:
         raise ToolError("A new memory needs a `title`: a few words in the user's language.")
-    return await store.remember(
-        name=name,
-        title=title.strip(),
-        archived=archived,
-        description=description,
-        content=content,
-        type=type,
-        category=category,
-        source_app=_client_name(ctx),
-        related=related,
-        provenance=provenance,
-        allow_duplicate=allow_duplicate,
-    )
+    try:
+        return await store.remember(
+            name=name,
+            title=title.strip(),
+            archived=archived,
+            description=description,
+            content=content,
+            type=type,
+            category=category,
+            source_app=_client_name(ctx),
+            related=related,
+            provenance=provenance,
+            allow_duplicate=allow_duplicate,
+            supersedes=supersedes,
+        )
+    except LookupError as e:
+        raise ToolError(str(e)) from e
+
+
+@mcp.tool
+async def edit(
+    ctx: Context,
+    name: Annotated[str, Field(description="Exact name of the memory to change.")],
+    edits: Annotated[
+        list[ContentEdit],
+        Field(
+            max_length=64,
+            description=(
+                "Find-and-replace pairs applied to the content in order. Copy each "
+                "`old` exactly from the current content; it must occur there exactly "
+                "once (add surrounding words to make it unique). An empty `new` "
+                "deletes `old`."
+            ),
+        ),
+    ] = [],  # noqa: B006 — FastMCP reads the default to build the schema.
+    related: Annotated[
+        list[str] | None,
+        Field(description="Replacement link list. Omit to keep the current links."),
+    ] = None,
+) -> EditResult:
+    """Change part of one memory without re-sending all of it: fix a word,
+    a wrong link or a stale line. Edits apply all or none; type, category,
+    title and description stay as they are. Prefer this over `remember` for
+    small changes — `remember` needs the whole content, so a two-word fix
+    costs the full memory twice. Reports `missing_links` like `remember`."""
+    if not edits and related is None:
+        raise ToolError("Nothing to change: pass `edits`, `related`, or both.")
+    store = await get_store()
+    try:
+        result = await store.edit(name, edits, source_app=_client_name(ctx), related=related)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    if result is None:
+        raise ToolError(f"No memory named {name}.")
+    return result
 
 
 @mcp.tool

@@ -7,6 +7,7 @@ silently accumulating.
 """
 
 import asyncio
+import re
 from typing import Any
 
 import asyncpg
@@ -15,8 +16,10 @@ from axiom.embeddings import GeminiEmbedder, to_pgvector
 from axiom.models import (
     AppActivity,
     Category,
+    ContentEdit,
     DriftedOverview,
     DuplicatePair,
+    EditResult,
     Event,
     EventCluster,
     Memory,
@@ -32,6 +35,12 @@ from axiom.models import (
 # Project overviews follow this name suffix by convention (see the server
 # instructions); staleness and orphan checks key off it.
 _OVERVIEW_SUFFIX = "-overview"
+
+# The category a new memory gets when the writer names none.
+_DEFAULT_CATEGORY: dict[str, Category] = {"preference": "you", "project": "areas"}
+
+# A link to another memory inside content, e.g. "see [[project-overview]]".
+_LINK = re.compile(r"\[\[([^\]]+)\]\]")
 
 # Memories left behind by a forgotten overview: they share its name prefix or
 # were linked from its final version, and no live overview links them now.
@@ -162,26 +171,27 @@ class MemoryStore:
         related: list[str] | None = None,
         provenance: Provenance | None = None,
         allow_duplicate: bool = False,
+        supersedes: list[str] | None = None,
     ) -> RememberResult:
         """Create or update one memory. provenance=None keeps an existing
         memory's provenance on update (so a routine edit never silently
         upgrades an inference to a stated fact) and means 'stated' on
-        create. An empty title and archived=None likewise keep what is there."""
-        related = related or []
-        if category is None:
-            if type == "preference":
-                category = "you"
-            elif type == "project":
-                category = "areas"
-            else:
-                category = "topics"
+        create. An empty title, archived=None, category=None and
+        related=None likewise keep what is there; on create, category=None
+        is inferred from type. supersedes names memories this one replaces:
+        they are archived and every link to them moves onto this one (see
+        `_supersede`), all in the same transaction as the write. The result
+        lists the links that point at no memory, so a typo or a renamed
+        target is caught when written rather than by a later sweep."""
+        supersedes = [s for s in dict.fromkeys(supersedes or []) if s != name]
         embedding = await self._embed_memory(name, description, content)
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             updated = await conn.fetchrow(
                 f"""
                 UPDATE memories m
-                SET description = $2, content = $3, type = $4, category = $5, source_app = $6,
-                    related = $7, embedding = $8::vector,
+                SET description = $2, content = $3, type = $4,
+                    category = COALESCE($5, m.category), source_app = $6,
+                    related = COALESCE($7, m.related), embedding = $8::vector,
                     provenance = COALESCE($9, m.provenance),
                     title = COALESCE(NULLIF($10, ''), m.title),
                     archived = COALESCE($11, m.archived), updated_at = now()
@@ -201,7 +211,11 @@ class MemoryStore:
                 archived,
             )
             if updated is not None:
-                return RememberResult(status="updated", memory=Memory.from_row(updated))
+                return await self._linked_result(
+                    conn,
+                    RememberResult(status="updated", memory=Memory.from_row(updated)),
+                    supersedes,
+                )
 
             search_text = f"{name} {description} {content}"
             if not allow_duplicate:
@@ -209,6 +223,7 @@ class MemoryStore:
                     conn,
                     search_text,
                     embedding if self._semantic_dedup_threshold is not None else None,
+                    exclude=supersedes,
                 )
                 if similar:
                     return RememberResult(status="duplicate_suspected", similar=similar)
@@ -231,17 +246,161 @@ class MemoryStore:
                 description,
                 content,
                 type,
-                category,
+                category or _DEFAULT_CATEGORY.get(type, "topics"),
                 source_app,
-                related,
+                related or [],
                 embedding,
                 provenance or "stated",
                 title,
                 archived or False,
             )
             assert created is not None
-            return RememberResult(
-                status="created", memory=Memory.from_row(created), neighbors=neighbors
+            return await self._linked_result(
+                conn,
+                RememberResult(
+                    status="created", memory=Memory.from_row(created), neighbors=neighbors
+                ),
+                supersedes,
+            )
+
+    async def _linked_result(
+        self,
+        conn: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+        result: RememberResult,
+        supersedes: list[str],
+    ) -> RememberResult:
+        """Finish a write: retire what it supersedes, then report its links
+        that point at no memory."""
+        memory = result.memory
+        assert memory is not None
+        if supersedes:
+            result.superseded = supersedes
+            result.relinked = await self._supersede(conn, memory.name, supersedes)
+        result.missing_links = await self._missing_links(
+            conn, memory.name, memory.content, memory.related
+        )
+        return result
+
+    async def _supersede(
+        self,
+        conn: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+        name: str,
+        old_names: list[str],
+    ) -> list[str]:
+        """Archive old_names and move every link to them onto `name`, the
+        memory replacing them: `[[old]]` in other memories' content becomes
+        `[[name]]`, and `related` entries are swapped (and deduplicated).
+        The replacing and the replaced memories keep their own text, which
+        may mention the old names on purpose. The rewrite is bookkeeping, so
+        updated_at stays put; the version trigger still snapshots any content
+        it changes. Raises LookupError, rolling the write back, when an old
+        name is no memory."""
+        rows = await conn.fetch(
+            "UPDATE memories SET archived = true WHERE name = ANY($1::text[]) RETURNING name",
+            old_names,
+        )
+        missing = set(old_names) - {r["name"] for r in rows}
+        if missing:
+            raise LookupError(f"No memory to supersede named: {', '.join(sorted(missing))}")
+        old_links = [f"[[{old}]]" for old in old_names]
+        rows = await conn.fetch(
+            """
+            SELECT name, content, related FROM memories m
+            WHERE m.name <> $1 AND NOT m.name = ANY($2::text[])
+              AND (m.related && $2::text[]
+                   OR EXISTS (SELECT 1 FROM unnest($3::text[]) l WHERE strpos(m.content, l) > 0))
+            ORDER BY name
+            """,
+            name,
+            old_names,
+            old_links,
+        )
+        for r in rows:
+            content = r["content"]
+            for link in old_links:
+                content = content.replace(link, f"[[{name}]]")
+            related = [name if n in old_names else n for n in r["related"]]
+            related = [n for n in dict.fromkeys(related) if n != r["name"]]
+            await conn.execute(
+                "UPDATE memories SET content = $2, related = $3 WHERE name = $1",
+                r["name"],
+                content,
+                related,
+            )
+        return [r["name"] for r in rows]
+
+    async def _missing_links(
+        self,
+        conn: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+        name: str,
+        content: str,
+        related: list[str],
+    ) -> list[str]:
+        """The names `content` (as `[[name]]`) and `related` link to that no
+        memory carries, in the order they appear."""
+        links = [n for n in dict.fromkeys([*_LINK.findall(content), *related]) if n != name]
+        if not links:
+            return []
+        rows = await conn.fetch("SELECT name FROM memories WHERE name = ANY($1::text[])", links)
+        found = {r["name"] for r in rows}
+        return [n for n in links if n not in found]
+
+    async def edit(
+        self,
+        name: str,
+        edits: list[ContentEdit],
+        *,
+        source_app: str,
+        related: list[str] | None = None,
+    ) -> EditResult | None:
+        """Change part of a memory's content without resending all of it:
+        each edit replaces text that must occur exactly once, applied in
+        order, all or none. related, when given, replaces the link list.
+        Type, category and everything else stay as they are. None when no
+        memory has the name; ValueError when an edit does not apply or the
+        memory changed while this one was being applied."""
+        row = await self._pool.fetchrow(
+            "SELECT description, content FROM memories WHERE name = $1", name
+        )
+        if row is None:
+            return None
+        content = row["content"]
+        for i, e in enumerate(edits, 1):
+            count = content.count(e.old)
+            if count != 1:
+                raise ValueError(
+                    f"Edit {i}: its old text occurs {count} times in {name}; "
+                    "it must occur exactly once. Nothing was changed."
+                )
+            content = content.replace(e.old, e.new, 1)
+        embedding = await self._embed_memory(name, row["description"], content)
+        async with self._pool.acquire() as conn, conn.transaction():
+            updated = await conn.fetchrow(
+                """
+                UPDATE memories m
+                SET content = $3, embedding = COALESCE($4::vector, m.embedding),
+                    related = COALESCE($5, m.related), source_app = $6, updated_at = now()
+                WHERE m.name = $1 AND m.content = $2
+                RETURNING m.updated_at, m.related
+                """,
+                name,
+                row["content"],
+                content,
+                embedding,
+                related,
+                source_app,
+            )
+            if updated is None:
+                raise ValueError(
+                    f"{name} changed while the edit was applied. Nothing was changed; retry."
+                )
+            return EditResult(
+                name=name,
+                updated_at=updated["updated_at"],
+                chars=len(content),
+                missing_links=await self._missing_links(
+                    conn, name, content, list(updated["related"])
+                ),
             )
 
     async def _embed_memory(self, name: str, description: str, content: str) -> str | None:
@@ -406,13 +565,20 @@ class MemoryStore:
 
     async def forget(self, name: str) -> bool:
         """Delete one memory and scrub its name from every other memory's
-        `related` list, so recall never points onward to a deleted entry."""
+        `related` list, so recall never points onward to a deleted entry.
+        A `[[name]]` link in another memory's content is unwrapped to the
+        plain name: the sentence around it still reads, the dead link goes."""
         async with self._pool.acquire() as conn, conn.transaction():
             result = await conn.execute("DELETE FROM memories WHERE name = $1", name)
             if result != "DELETE 1":
                 return False
             await conn.execute(
                 "UPDATE memories SET related = array_remove(related, $1) WHERE $1 = ANY(related)",
+                name,
+            )
+            await conn.execute(
+                "UPDATE memories SET content = replace(content, '[[' || $1 || ']]', $1) "
+                "WHERE strpos(content, '[[' || $1 || ']]') > 0",
                 name,
             )
             return True
@@ -877,6 +1043,7 @@ class MemoryStore:
         conn: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
         text: str,
         embedding: str | None,
+        exclude: list[str] | None = None,
     ) -> list[Memory]:
         """Trigram screening catches lexical near-duplicates; the optional
         embedding screen (embedding given) catches paraphrases and
@@ -884,7 +1051,8 @@ class MemoryStore:
         one shares no trigrams at all). Either signal alone is enough to
         flag. Archived memories never flag: a new memory resembling one is
         its replacement, and steering the write onto the archived name would
-        leave the current fact archived and hidden from recall."""
+        leave the current fact archived and hidden from recall. Nor do the
+        memories in exclude: the ones a write supersedes."""
         rows = await conn.fetch(
             f"""
             SELECT {_COLUMNS},
@@ -895,7 +1063,7 @@ class MemoryStore:
                        END
                    )::float8 AS score
             FROM memories m
-            WHERE NOT m.archived
+            WHERE NOT m.archived AND NOT m.name = ANY($5::text[])
               AND (similarity({_SEARCH_TEXT}, $1) >= $2
                    OR ($3::text IS NOT NULL AND m.embedding IS NOT NULL
                        AND 1 - (m.embedding <=> ($3::text)::vector) >= $4))
@@ -906,5 +1074,6 @@ class MemoryStore:
             self._dedup_threshold,
             embedding,
             self._semantic_dedup_threshold,
+            exclude or [],
         )
         return [Memory.from_row(r) for r in rows]

@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from axiom.export import export_all
+from axiom.models import ContentEdit
 from axiom.store import MemoryStore
 
 
@@ -711,3 +714,177 @@ async def test_export_writes_and_prunes(store: MemoryStore, tmp_path: Path):
     assert body.startswith("---\nname: kept-memory\n")
     assert "category: topics\n" in body
     assert "Content here." in body
+
+
+async def test_update_without_category_or_related_keeps_them(store: MemoryStore):
+    await store.remember(
+        name="morning-routine",
+        description="How Tim starts the day",
+        content="Coffee, then email.",
+        type="procedural",
+        category="you",
+        source_app="test",
+        related=["user-profile"],
+    )
+    result = await store.remember(
+        name="morning-routine",
+        description="How Tim starts the day",
+        content="Coffee, then a walk.",
+        type="procedural",
+        source_app="test",
+    )
+    assert result.memory is not None
+    assert result.memory.category == "you" and result.memory.related == ["user-profile"]
+    cleared = await store.remember(
+        name="morning-routine",
+        description="How Tim starts the day",
+        content="Coffee, then a walk.",
+        type="procedural",
+        source_app="test",
+        related=[],
+    )
+    assert cleared.memory is not None and cleared.memory.related == []
+
+
+async def test_remember_reports_missing_links(store: MemoryStore):
+    await store.remember(
+        name="bank-main",
+        description="Main account",
+        content="Main account.",
+        type="fact",
+        source_app="test",
+    )
+    result = await store.remember(
+        name="savings-plan",
+        description="Where savings go each month",
+        content="Salary goes to [[bank-main]]; spending per [[budget-rules]].",
+        type="project",
+        source_app="test",
+        related=["bank-main", "bank-joint"],
+    )
+    assert result.status == "created"
+    assert result.missing_links == ["budget-rules", "bank-joint"]
+
+
+async def test_supersedes_archives_and_relinks(store: MemoryStore):
+    await store.remember(
+        name="main-account-overview",
+        description="Main account overview",
+        content="Salary lands in the main bank account.",
+        type="project",
+        source_app="test",
+    )
+    await store.remember(
+        name="tax-filing",
+        description="Yearly tax filing steps",
+        content="Export statements from [[main-account-overview]].",
+        type="project",
+        source_app="test",
+        related=["main-account-overview"],
+    )
+    result = await store.remember(
+        name="bank-main",
+        description="Main account overview",
+        content="Salary lands in the main bank account.",
+        type="project",
+        source_app="test",
+        supersedes=["main-account-overview"],
+    )
+    assert result.status == "created"
+    assert result.superseded == ["main-account-overview"] and result.relinked == ["tax-filing"]
+    assert result.missing_links == []
+    old = await store.get("main-account-overview")
+    assert old is not None and old.archived
+    filing = await store.get("tax-filing")
+    assert filing is not None
+    assert filing.content == "Export statements from [[bank-main]]."
+    assert filing.related == ["bank-main"]
+    # The rewrite is versioned like any content change, so it can be undone.
+    [before] = await store.history("tax-filing")
+    assert before.content == "Export statements from [[main-account-overview]]."
+
+
+async def test_supersedes_unknown_name_writes_nothing(store: MemoryStore):
+    with pytest.raises(LookupError, match="no-such-memory"):
+        await store.remember(
+            name="fresh-fact",
+            description="A fact",
+            content="Something new.",
+            type="fact",
+            source_app="test",
+            supersedes=["no-such-memory"],
+        )
+    assert await store.get("fresh-fact") is None
+
+
+async def test_edit_changes_only_the_matched_text(store: MemoryStore):
+    await store.remember(
+        name="bank-notes",
+        title="Bank 錢包",
+        description="Bank account notes",
+        content="Bank 錢包 holds the savings. The 錢包 is shared.",
+        type="fact",
+        category="areas",
+        source_app="test",
+        related=["bank-main"],
+    )
+    result = await store.edit(
+        "bank-notes",
+        [
+            ContentEdit(old="Bank 錢包", new="Bank 帳戶"),
+            ContentEdit(old="The 錢包", new="The 帳戶"),
+        ],
+        source_app="other-app",
+    )
+    assert result is not None and result.missing_links == ["bank-main"]
+    memory = await store.get("bank-notes")
+    assert memory is not None
+    assert memory.content == "Bank 帳戶 holds the savings. The 帳戶 is shared."
+    assert (memory.title, memory.category, memory.related) == (
+        "Bank 錢包",
+        "areas",
+        ["bank-main"],
+    )
+    assert memory.source_app == "other-app"
+
+    relinked = await store.edit("bank-notes", [], source_app="test", related=[])
+    assert relinked is not None and relinked.missing_links == []
+
+
+async def test_edit_is_all_or_nothing(store: MemoryStore):
+    await store.remember(
+        name="bank-notes",
+        description="Bank account notes",
+        content="錢包 one, 錢包 two.",
+        type="fact",
+        source_app="test",
+    )
+    with pytest.raises(ValueError, match="occurs 2 times"):
+        await store.edit(
+            "bank-notes",
+            [ContentEdit(old="one", new="1"), ContentEdit(old="錢包", new="帳戶")],
+            source_app="test",
+        )
+    memory = await store.get("bank-notes")
+    assert memory is not None and memory.content == "錢包 one, 錢包 two."
+    assert await store.edit("no-such-memory", [], source_app="test") is None
+
+
+async def test_forget_unwraps_content_links(store: MemoryStore):
+    await store.remember(
+        name="old-plan",
+        description="Old plan",
+        content="Superseded plan.",
+        type="project",
+        source_app="test",
+    )
+    await store.remember(
+        name="new-plan",
+        description="New plan",
+        content="Replaces [[old-plan]] entirely.",
+        type="project",
+        source_app="test",
+    )
+    assert await store.forget("old-plan") is True
+    survivor = await store.get("new-plan")
+    assert survivor is not None and survivor.content == "Replaces old-plan entirely."
