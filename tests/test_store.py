@@ -203,14 +203,14 @@ async def test_recall_does_not_touch_updated_at(store: MemoryStore):
 
 async def test_recall_matches_chinese_content(store: MemoryStore):
     await store.remember(
-        name="gateway-positioning",
-        description="Gateway product positioning",
-        content="這個產品是賣給金融業 CISO 的 AI 治理閘道,重點是稽核與存取控制。",
+        name="bakery-positioning",
+        description="Bakery product positioning",
+        content="這家麵包店主打天然酵母歐式麵包,重點是當日現烤與在地小麥。",
         type="project",
         source_app="test",
     )
-    results = await store.recall("金融業 治理")
-    assert [m.name for m in results] == ["gateway-positioning"]
+    results = await store.recall("天然酵母 麵包")
+    assert [m.name for m in results] == ["bakery-positioning"]
 
 
 async def test_recall_decays_stale_memories(store: MemoryStore, pool):

@@ -103,7 +103,7 @@ CLI: `axiom serve`, `axiom migrate`, `axiom export`, `axiom embed`,
 Requires [uv](https://docs.astral.sh/uv/) and Docker.
 
 ```sh
-git clone https://github.com/taimoe-ai/axiom-memory && cd axiom-memory
+git clone https://github.com/TimChiang0106/axiom-memory && cd axiom-memory
 docker compose up -d          # local Postgres (pgvector)
 cp .env.example .env
 uv run axiom serve            # stdio MCP server (migrations run on first call)
