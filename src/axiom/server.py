@@ -147,7 +147,8 @@ mcp = FastMCP(
         "their preferences, ongoing projects, contacts, or past decisions. Call `remember` "
         "when the user states a durable fact, preference, or decision — store one "
         "curated fact per memory, never conversation logs, and give it a short "
-        "`title` in the user's language beside its slug `name`. Call `log_event` for "
+        "`title` in the user's language beside its slug `name`; when one is superseded "
+        "but worth keeping as history, re-remember it with archived=true. Call `log_event` for "
         "weak ambient signals (what they asked about or did) that aren't worth a "
         "curated memory yet. Each ongoing project keeps one `<project>-overview` "
         "memory (status with a date, decisions in force, abandoned approaches, open "
@@ -215,6 +216,17 @@ async def remember(
             )
         ),
     ] = "",
+    archived: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "True for a memory kept only as history — superseded, closed or no "
+                "longer in force — instead of marking it as history in its title. The "
+                "user's library hides it by default. Omit on update to keep the "
+                "current value."
+            )
+        ),
+    ] = None,
     category: Annotated[
         Category | None,
         Field(
@@ -279,6 +291,7 @@ async def remember(
     return await store.remember(
         name=name,
         title=title.strip(),
+        archived=archived,
         description=description,
         content=content,
         type=type,

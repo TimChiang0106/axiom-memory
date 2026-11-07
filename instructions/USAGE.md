@@ -32,6 +32,8 @@ I use "axiom" (MCP) as my long-term memory, shared across all my AI apps.
   remember something — call `remember`. Distill it into one curated statement;
   never store conversation logs. Use absolute dates. Give it a short `title`
   in my language — that is what I read it by — beside the slug `name`.
+  When a memory is superseded but worth keeping as history, re-remember it
+  with `archived: true` instead of writing （歷史） into it.
   Assign `category`: `you` (profile, tastes, habits), `people` (colleagues, clients,
   relationships), `areas` (projects, products, client accounts), or `topics`
   (skills, guidelines, domain knowledge). If omitted it is inferred from type.

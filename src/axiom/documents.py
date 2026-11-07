@@ -64,7 +64,8 @@ class DocumentStore:
     async def list_all(self, *, project: str | None = None) -> list[DocumentSummary]:
         rows = await self._pool.fetch(
             """
-            SELECT name, title, project, length(body) AS chars, updated_at FROM documents
+            SELECT name, title, project, length(body) AS chars, created_at, updated_at
+            FROM documents
             WHERE $1::text IS NULL OR project = $1
             ORDER BY updated_at DESC
             """,

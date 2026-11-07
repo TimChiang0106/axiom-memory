@@ -31,7 +31,10 @@ _KIND_ORDER = {k: n for n, k in enumerate(_KIND_LABELS)}
 _PAGE_SIZES = (25, 50, 100)
 _SEARCH_LIMIT = 100
 # Each sortable column and the direction its first click sorts in.
-_SORTS = {"name": "asc", "kind": "asc", "updated": "desc"}
+_SORTS = {"name": "asc", "project": "asc", "kind": "asc", "created": "desc", "updated": "desc"}
+# Which memories the 狀態 filter shows: in force (the default), all, or
+# only those kept as history.
+_STATES = {"": "現行", "all": "含歷史", "only": "只看歷史"}
 
 
 @dataclass
@@ -41,18 +44,58 @@ class _Item:
     sub: str
     kind: str
     category: str
+    project: str
+    created_at: datetime | None
     updated_at: datetime
+    archived: bool = False
 
 
-def _memory_item(m: Memory | MemorySummary) -> _Item:
+def _memory_item(m: Memory | MemorySummary, project: str) -> _Item:
     """Read by its title — or, on a memory older than titles, its
     description — with the slug underneath for when the AI names it."""
-    return _Item(f"/app/memory/{m.name}", m.label, m.name, m.type, m.category, m.updated_at)
+    return _Item(
+        f"/app/memory/{m.name}",
+        m.label,
+        m.name,
+        m.type,
+        m.category,
+        project,
+        m.created_at,
+        m.updated_at,
+        m.archived,
+    )
 
 
 def _doc_item(d: DocumentSummary) -> _Item:
-    sub = f"{d.project + '・' if d.project else ''}{d.chars} 字"
-    return _Item(f"/app/docs/{d.name}", d.title, sub, "doc", "", d.updated_at)
+    return _Item(
+        f"/app/docs/{d.name}",
+        d.title,
+        f"{d.chars} 字",
+        "doc",
+        "",
+        d.project or "",
+        d.created_at,
+        d.updated_at,
+    )
+
+
+def _project_finder(overviews: list[Memory], projects: dict[str, str]):
+    """Which project a memory belongs to: its own overview, the overview
+    whose name prefix it carries (the longest, so `billing-api-x` goes to
+    billing-api before billing), else an overview that links to it."""
+    by_length = sorted(projects, key=len, reverse=True)
+    linked: dict[str, str] = {}
+    for o in overviews:
+        for n in o.related:
+            linked.setdefault(n, o.name.removesuffix("-overview"))
+
+    def find(name: str) -> str:
+        for p in by_length:
+            if name == f"{p}-overview" or name.startswith(f"{p}-"):
+                return p
+        return linked.get(name, "")
+
+    return find
 
 
 @dataclass
@@ -63,6 +106,8 @@ class _LibraryView:
     q: str = ""
     c: str = ""
     t: str = ""
+    pj: str = ""
+    h: str = ""
     s: str = ""
     d: str = ""
     p: int = 1
@@ -79,6 +124,8 @@ class _LibraryView:
             q=params.get("q", "").strip(),
             c=params.get("c", "") if params.get("c") in CATEGORY_LABELS else "",
             t=params.get("t", "") if params.get("t") in _KIND_LABELS else "",
+            pj=params.get("pj", ""),
+            h=params.get("h", "") if params.get("h") in _STATES else "",
             s=params.get("s", "") if params.get("s") in _SORTS else "",
             d=params.get("d", "") if params.get("d") in ("asc", "desc") else "",
             p=number("p", 1),
@@ -99,22 +146,46 @@ class _LibraryView:
         defaults = asdict(_LibraryView())
         return ui.with_query("/app/library", **{k: v for k, v in state.items() if v != defaults[k]})
 
-    def sorted(self, items: list[_Item]) -> list[_Item]:
+    def sorted(self, items: list[_Item], projects: dict[str, str]) -> list[_Item]:
         desc = self.direction == "desc"
         if self.sort == "name":
             return sorted(items, key=lambda i: i.name.casefold(), reverse=desc)
         if self.sort == "kind":
             by_date = sorted(items, key=lambda i: i.updated_at, reverse=True)
             return sorted(by_date, key=lambda i: _KIND_ORDER[i.kind], reverse=desc)
+        if self.sort == "project":
+            # Rows without a project go last whichever way it runs.
+            ranked = sorted(items, key=lambda i: projects.get(i.project, i.project), reverse=desc)
+            return sorted(ranked, key=lambda i: not i.project)
+        if self.sort == "created":
+            return sorted(items, key=lambda i: i.created_at or i.updated_at, reverse=desc)
         if self.sort == "updated":
             return sorted(items, key=lambda i: i.updated_at, reverse=desc)
         return items
 
+    def shows(self, item: _Item) -> bool:
+        """Every filter but the category chips, which count what this leaves."""
+        if self.t and item.kind != self.t:
+            return False
+        if self.pj and item.project != self.pj:
+            return False
+        if self.h == "only":
+            return item.archived
+        return self.h == "all" or not item.archived
 
-def _filters(view: _LibraryView) -> str:
+
+def _filters(view: _LibraryView, projects: dict[str, str]) -> str:
     kinds = '<option value="">全部種類</option>' + "".join(
         f'<option value="{k}"{" selected" if k == view.t else ""}>{label}</option>'
         for k, label in _KIND_LABELS.items()
+    )
+    project_options = '<option value="">全部專案</option>' + "".join(
+        f'<option value="{escape(p)}"{" selected" if p == view.pj else ""}>{escape(name)}</option>'
+        for p, name in sorted(projects.items(), key=lambda kv: kv[1].casefold())
+    )
+    states = "".join(
+        f'<option value="{k}"{" selected" if k == view.h else ""}>{label}</option>'
+        for k, label in _STATES.items()
     )
     sizes = "".join(
         f'<option value="{n}"{" selected" if n == view.n else ""}>每頁 {n} 筆</option>'
@@ -132,6 +203,8 @@ def _filters(view: _LibraryView) -> str:
         'aria-label="搜尋記憶與文件" enterkeyhint="search">'
         '<button class="primary">搜尋</button>'
         f'<select name="t" aria-label="種類"{submit}>{kinds}</select>'
+        f'<select name="pj" aria-label="專案"{submit}>{project_options}</select>'
+        f'<select name="h" aria-label="狀態"{submit}>{states}</select>'
         f'<select name="n" aria-label="每頁筆數"{submit}>{sizes}</select>'
         f"{hidden}"
         '<a class="btn" href="/app/review" '
@@ -139,7 +212,7 @@ def _filters(view: _LibraryView) -> str:
     )
 
 
-def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
+def _table(view: _LibraryView, rows: list[_Item], projects: dict[str, str], ctx: WebContext) -> str:
     def head(key: str, label: str, cls: str) -> str:
         on = view.sort == key
         flip = "desc" if view.direction == "asc" else "asc"
@@ -153,20 +226,38 @@ def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
 
     if not rows:
         return '<div class="list table-wrap"><div class="empty">沒有符合的資料。</div></div>'
+
+    def when(at: datetime | None, cls: str) -> str:
+        if at is None:
+            return f'<td class="{cls}">—</td>'
+        return f'<td class="{cls}"><time title="{ctx.local(at)}">{ctx.local(at)[:10]}</time></td>'
+
+    def project(i: _Item) -> str:
+        if not i.project:
+            return '<td class="cat wide">—</td>'
+        name = projects.get(i.project, i.project)
+        return (
+            f'<td class="cat wide"><a href="{escape(view.url(pj=i.project, p=1))}">'
+            f"{escape(name)}</a></td>"
+        )
+
     body = "".join(
         f'<tr><td class="name"><a class="clamp" href="{escape(i.href)}">{escape(i.name)}</a>'
-        f'<div class="meta">{escape(i.sub)}</div></td>'
+        f'<div class="meta">{"<span class=tag>歷史</span>" if i.archived else ""}'
+        f"{escape(i.sub)}</div></td>"
+        f"{project(i)}"
         f'<td class="kind"><span class="tag">{_KIND_LABELS[i.kind]}</span></td>'
         f'<td class="cat">{CATEGORY_LABELS.get(i.category, "—")}</td>'
-        f'<td class="when"><time title="{ctx.local(i.updated_at)}">'
-        f"{ctx.local(i.updated_at)[:10]}</time></td></tr>"
+        f"{when(i.created_at, 'when wide')}{when(i.updated_at, 'when')}</tr>"
         for i in rows
     )
     return (
         '<div class="list table-wrap"><table class="data"><thead><tr>'
         + head("name", "名稱", "name")
+        + head("project", "專案", "cat wide")
         + head("kind", "種類", "kind")
         + '<th class="cat">分類</th>'
+        + head("created", "建立時間", "when wide")
         + head("updated", "更新時間", "when")
         + f"</tr></thead><tbody>{body}</tbody></table></div>"
     )
@@ -215,7 +306,12 @@ def routes(ctx: WebContext) -> list[Route]:
             return denied
         memories = await ctx.get_memories()
         documents = await ctx.get_documents()
+        tasks = await ctx.get_tasks()
         view = _LibraryView.parse(request.query_params)
+        projects = await tasks.project_names()
+        if view.pj not in projects:
+            view.pj = ""
+        project_of = _project_finder(await memories.overviews(), projects)
         if view.q:
             found = await memories.recall(view.q, limit=_SEARCH_LIMIT, track_usage=False)
             needle = view.q.casefold()
@@ -224,22 +320,23 @@ def routes(ctx: WebContext) -> list[Route]:
                 for d in await documents.list_all()
                 if needle in f"{d.name} {d.title} {d.project or ''}".casefold()
             ]
-            items = [_doc_item(d) for d in docs] + [_memory_item(m) for m in found]
+            found_memories = [_memory_item(m, project_of(m.name)) for m in found]
+            items = [_doc_item(d) for d in docs] + found_memories
         else:
             items = [_doc_item(d) for d in await documents.list_all()] + [
-                _memory_item(m) for m in await memories.list_all()
+                _memory_item(m, project_of(m.name)) for m in await memories.list_all()
             ]
 
-        typed = [i for i in items if not view.t or i.kind == view.t]
+        typed = [i for i in items if view.shows(i)]
         counts = Counter(i.category for i in typed)
         shown = [i for i in typed if not view.c or i.category == view.c]
-        shown = view.sorted(shown)
+        shown = view.sorted(shown, projects)
         pages = max(1, -(-len(shown) // view.n))
         p = min(view.p, pages)
         rows = shown[(p - 1) * view.n : p * view.n]
 
-        body = "<h1>資料</h1>" + _filters(view)
-        body += await ctx.notices(request, await ctx.get_tasks())
+        body = "<h1>資料</h1>" + _filters(view, projects)
+        body += await ctx.notices(request, tasks)
         chips = [("", "全部", len(typed))] + [
             (key, label, counts[key]) for key, label in CATEGORY_LABELS.items() if counts[key]
         ]
@@ -253,7 +350,7 @@ def routes(ctx: WebContext) -> list[Route]:
             )
             + "</div>"
         )
-        body += _table(view, rows, ctx)
+        body += _table(view, rows, projects, ctx)
         body += _pager(view, p, pages, len(shown))
         title = f"搜尋 {view.q}" if view.q else CATEGORY_LABELS.get(view.c, "資料")
         return page(title, "library", body)

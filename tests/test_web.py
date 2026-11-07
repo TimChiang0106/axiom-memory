@@ -288,6 +288,23 @@ async def test_library_project_and_doc_pages(
     by_name = await client.get("/app/library", params={"s": "name"}, headers=BEARER)
     assert by_name.text.index("Acme spec") < by_name.text.index("Acme 總覽")
     assert 'href="/app/library?s=name&amp;d=desc"' in by_name.text
+    await store.remember(
+        name="acme-old-plan",
+        title="Acme 舊計畫",
+        description="The plan before the rewrite",
+        content="Superseded.",
+        type="state",
+        source_app="t",
+        archived=True,
+        allow_duplicate=True,
+    )
+    current = (await client.get("/app/library", headers=BEARER)).text
+    assert "Acme 舊計畫" not in current and "建立時間" in current
+    assert 'href="/app/library?pj=acme">Acme</a>' in current
+    history = await client.get("/app/library", params={"h": "only"}, headers=BEARER)
+    assert "Acme 舊計畫" in history.text and "Acme 總覽" not in history.text
+    mine = await client.get("/app/library", params={"pj": "acme", "h": "all"}, headers=BEARER)
+    assert "Acme 舊計畫" in mine.text and "Acme spec" in mine.text
     one = await client.get("/app/library", params={"n": "25", "p": "9"}, headers=BEARER)
     assert "共 2 筆" in one.text and one.text.count("<tr>") == 3
     doc = await client.get("/app/docs/acme-spec", headers=BEARER)

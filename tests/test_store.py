@@ -59,6 +59,27 @@ async def test_title_survives_an_update_without_one(store: MemoryStore):
     assert summary.title == "目前用的 shell" and summary.label == "目前用的 shell"
 
 
+async def test_archived_survives_an_update_that_leaves_it_out(store: MemoryStore):
+    await store.remember(
+        name="old-deploy",
+        description="Old deploy flow",
+        content="v1",
+        type="procedural",
+        source_app="test",
+        archived=True,
+    )
+    result = await store.remember(
+        name="old-deploy",
+        description="Old deploy flow",
+        content="v2",
+        type="procedural",
+        source_app="test",
+    )
+    assert result.memory is not None and result.memory.archived
+    [summary] = await store.list_all()
+    assert summary.archived and summary.created_at is not None
+
+
 async def test_remember_flags_near_duplicate(store: MemoryStore):
     await store.remember(
         name="prefers-uv-over-pip",

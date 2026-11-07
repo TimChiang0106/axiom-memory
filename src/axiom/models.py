@@ -20,6 +20,8 @@ class Memory(BaseModel):
     name: str = Field(pattern=NAME_PATTERN)
     # What a person reads it by; empty on memories written before titles.
     title: str = ""
+    # Kept as history only; the library hides it unless asked.
+    archived: bool = False
     description: str
     content: str
     type: MemoryType
@@ -63,6 +65,7 @@ class Memory(BaseModel):
         return cls(
             name=row["name"],
             title=row.get("title") or "",
+            archived=row.get("archived") or False,
             description=row["description"],
             content=row["content"],
             type=row["type"],
@@ -87,7 +90,9 @@ class MemorySummary(BaseModel):
     description: str
     type: MemoryType
     category: Category
+    created_at: datetime | None = None
     updated_at: datetime
+    archived: bool = False
 
     @property
     def label(self) -> str:
@@ -273,6 +278,7 @@ class DocumentSummary(BaseModel):
     title: str
     project: str | None = None
     chars: int
+    created_at: datetime | None = None
     updated_at: datetime
 
 
