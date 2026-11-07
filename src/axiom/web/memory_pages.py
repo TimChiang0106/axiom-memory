@@ -4,6 +4,8 @@ review inbox, the "我" page, and the backup download."""
 import io
 import zipfile
 from collections import Counter
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from html import escape
 
@@ -12,6 +14,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from axiom.export import render_index, render_memory
+from axiom.models import DocumentSummary, Memory, MemorySummary
 from axiom.web import components as ui
 from axiom.web.context import WebContext
 from axiom.web.labels import (
@@ -21,6 +24,188 @@ from axiom.web.labels import (
 )
 from axiom.web.layout import page
 
+# The library is one table of memories and documents; "doc" is the kind
+# documents file under, next to the memory types.
+_KIND_LABELS = {**TYPE_LABELS, "doc": "文件"}
+_KIND_ORDER = {k: n for n, k in enumerate(_KIND_LABELS)}
+_PAGE_SIZES = (25, 50, 100)
+_SEARCH_LIMIT = 100
+# Each sortable column and the direction its first click sorts in.
+_SORTS = {"name": "asc", "kind": "asc", "updated": "desc"}
+
+
+@dataclass
+class _Item:
+    href: str
+    name: str
+    sub: str
+    kind: str
+    category: str
+    updated_at: datetime
+
+
+def _memory_item(m: Memory | MemorySummary) -> _Item:
+    return _Item(f"/app/memory/{m.name}", m.name, m.description, m.type, m.category, m.updated_at)
+
+
+def _doc_item(d: DocumentSummary) -> _Item:
+    sub = f"{d.project + '・' if d.project else ''}{d.chars} 字"
+    return _Item(f"/app/docs/{d.name}", d.title, sub, "doc", "", d.updated_at)
+
+
+@dataclass
+class _LibraryView:
+    """The library's filters, sort and page, as read from and written back
+    to the query string — defaults are left out so URLs stay short."""
+
+    q: str = ""
+    c: str = ""
+    t: str = ""
+    s: str = ""
+    d: str = ""
+    p: int = 1
+    n: int = 50
+
+    @classmethod
+    def parse(cls, params: Mapping[str, str]) -> "_LibraryView":
+        def number(key: str, default: int) -> int:
+            raw = params.get(key, "")
+            return int(raw) if raw.isdigit() and int(raw) > 0 else default
+
+        n = number("n", cls.n)
+        return cls(
+            q=params.get("q", "").strip(),
+            c=params.get("c", "") if params.get("c") in CATEGORY_LABELS else "",
+            t=params.get("t", "") if params.get("t") in _KIND_LABELS else "",
+            s=params.get("s", "") if params.get("s") in _SORTS else "",
+            d=params.get("d", "") if params.get("d") in ("asc", "desc") else "",
+            p=number("p", 1),
+            n=n if n in _PAGE_SIZES else cls.n,
+        )
+
+    @property
+    def sort(self) -> str:
+        """The column in force; "" is search relevance."""
+        return self.s or ("" if self.q else "updated")
+
+    @property
+    def direction(self) -> str:
+        return self.d or _SORTS.get(self.sort, "asc")
+
+    def url(self, **changes: str | int) -> str:
+        state = {**asdict(self), **changes}
+        defaults = asdict(_LibraryView())
+        return ui.with_query("/app/library", **{k: v for k, v in state.items() if v != defaults[k]})
+
+    def sorted(self, items: list[_Item]) -> list[_Item]:
+        desc = self.direction == "desc"
+        if self.sort == "name":
+            return sorted(items, key=lambda i: i.name.casefold(), reverse=desc)
+        if self.sort == "kind":
+            by_date = sorted(items, key=lambda i: i.updated_at, reverse=True)
+            return sorted(by_date, key=lambda i: _KIND_ORDER[i.kind], reverse=desc)
+        if self.sort == "updated":
+            return sorted(items, key=lambda i: i.updated_at, reverse=desc)
+        return items
+
+
+def _filters(view: _LibraryView) -> str:
+    kinds = '<option value="">全部種類</option>' + "".join(
+        f'<option value="{k}"{" selected" if k == view.t else ""}>{label}</option>'
+        for k, label in _KIND_LABELS.items()
+    )
+    sizes = "".join(
+        f'<option value="{n}"{" selected" if n == view.n else ""}>每頁 {n} 筆</option>'
+        for n in _PAGE_SIZES
+    )
+    hidden = "".join(
+        f'<input type="hidden" name="{k}" value="{escape(v)}">'
+        for k, v in (("c", view.c), ("s", view.s), ("d", view.d))
+        if v
+    )
+    submit = ' onchange="this.form.requestSubmit()"'
+    return (
+        '<form class="search filters" method="get" action="/app/library">'
+        f'<input type="search" name="q" value="{escape(view.q)}" placeholder="搜尋記憶與文件" '
+        'aria-label="搜尋記憶與文件" enterkeyhint="search">'
+        '<button class="primary">搜尋</button>'
+        f'<select name="t" aria-label="種類"{submit}>{kinds}</select>'
+        f'<select name="n" aria-label="每頁筆數"{submit}>{sizes}</select>'
+        f"{hidden}"
+        '<a class="btn" href="/app/review" '
+        'title="重複、過時、沒連到總覽的記憶，和 AI 最近記下的動態">整理記憶</a></form>'
+    )
+
+
+def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
+    def head(key: str, label: str, cls: str) -> str:
+        on = view.sort == key
+        flip = "desc" if view.direction == "asc" else "asc"
+        url = view.url(s=key, d=flip if on else _SORTS[key], p=1)
+        arrow = ("↑" if view.direction == "asc" else "↓") if on else ""
+        sort = f' aria-sort="{"ascending" if view.direction == "asc" else "descending"}"'
+        return (
+            f'<th class="{cls}"{sort if on else ""}>'
+            f'<a href="{escape(url)}">{label}<span class="arrow">{arrow}</span></a></th>'
+        )
+
+    if not rows:
+        return '<div class="list"><div class="empty">沒有符合的資料。</div></div>'
+    body = "".join(
+        f'<tr><td class="name"><a href="{escape(i.href)}">{escape(i.name)}</a>'
+        f'<div class="meta clamp">{escape(i.sub)}</div></td>'
+        f'<td class="kind"><span class="tag">{_KIND_LABELS[i.kind]}</span></td>'
+        f'<td class="cat">{CATEGORY_LABELS.get(i.category, "—")}</td>'
+        f'<td class="when"><time title="{ctx.local(i.updated_at)}">'
+        f"{ctx.local(i.updated_at)[:10]}</time></td></tr>"
+        for i in rows
+    )
+    return (
+        '<div class="list"><table class="lib"><thead><tr>'
+        + head("name", "名稱", "name")
+        + head("kind", "種類", "kind")
+        + '<th class="cat">分類</th>'
+        + head("updated", "更新時間", "when")
+        + f"</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
+def _pager(view: _LibraryView, p: int, pages: int, total: int) -> str:
+    if not total:
+        return ""
+    first = (p - 1) * view.n + 1
+    summary = f'<span class="meta">第 {first}–{min(p * view.n, total)} 筆，共 {total} 筆</span>'
+    if pages == 1:
+        return f'<div class="pager">{summary}</div>'
+
+    def link(to: int, label: str, aria: str = "") -> str:
+        extra = f' aria-label="{aria}"' if aria else ""
+        if to == p:
+            return f'<span class="btn on" aria-current="page">{label}</span>'
+        return f'<a class="btn" href="{escape(view.url(p=to))}"{extra}>{label}</a>'
+
+    shown = sorted({1, pages, *range(max(1, p - 2), min(pages, p + 2) + 1)})
+    numbers, last = [], 0
+    for n in shown:
+        if n - last > 1:
+            numbers.append('<span class="gap">…</span>')
+        numbers.append(link(n, str(n)))
+        last = n
+    prev = (
+        link(p - 1, "‹ 上一頁")
+        if p > 1
+        else '<span class="btn off" aria-disabled="true">‹ 上一頁</span>'
+    )
+    nxt = (
+        link(p + 1, "下一頁 ›")
+        if p < pages
+        else '<span class="btn off" aria-disabled="true">下一頁 ›</span>'
+    )
+    return (
+        f'<nav class="pager" aria-label="分頁">{summary}'
+        f'<div class="pages">{prev}{"".join(numbers)}{nxt}</div></nav>'
+    )
+
 
 def routes(ctx: WebContext) -> list[Route]:
     async def library_page(request: Request) -> Response:
@@ -28,78 +213,48 @@ def routes(ctx: WebContext) -> list[Route]:
             return denied
         memories = await ctx.get_memories()
         documents = await ctx.get_documents()
-        q = request.query_params.get("q", "").strip()
-        body = (
-            "<h1>資料</h1>"
-            '<form class="search" method="get" action="/app/library">'
-            f'<input type="search" name="q" value="{escape(q)}" placeholder="搜尋記憶" '
-            'aria-label="搜尋記憶" enterkeyhint="search">'
-            '<button class="primary">搜尋</button></form>'
-        )
-        body += await ctx.notices(request, await ctx.get_tasks())
+        view = _LibraryView.parse(request.query_params)
+        if view.q:
+            found = await memories.recall(view.q, limit=_SEARCH_LIMIT, track_usage=False)
+            needle = view.q.casefold()
+            docs = [
+                d
+                for d in await documents.list_all()
+                if needle in f"{d.name} {d.title} {d.project or ''}".casefold()
+            ]
+            items = [_doc_item(d) for d in docs] + [_memory_item(m) for m in found]
+        else:
+            items = [_doc_item(d) for d in await documents.list_all()] + [
+                _memory_item(m) for m in await memories.list_all()
+            ]
 
-        if q:
-            found = await memories.recall(q, limit=20, track_usage=False)
-            body += ui.section(
-                "搜尋結果",
-                [ui.memory_row(m.name, m.description, m.type) for m in found],
-                empty="沒有符合的記憶。",
-                grid=True,
-            )
-            return page(f"搜尋 {q}", "library", body)
-        category = request.query_params.get("c", "")
-        if category not in CATEGORY_LABELS:
-            category = ""
-        everything = await memories.list_all()
-        counts = Counter(m.category for m in everything)
-        chips = [("", "全部", len(everything))] + [
+        typed = [i for i in items if not view.t or i.kind == view.t]
+        counts = Counter(i.category for i in typed)
+        shown = [i for i in typed if not view.c or i.category == view.c]
+        shown = view.sorted(shown)
+        pages = max(1, -(-len(shown) // view.n))
+        p = min(view.p, pages)
+        rows = shown[(p - 1) * view.n : p * view.n]
+
+        body = "<h1>資料</h1>" + _filters(view)
+        body += await ctx.notices(request, await ctx.get_tasks())
+        chips = [("", "全部", len(typed))] + [
             (key, label, counts[key]) for key, label in CATEGORY_LABELS.items() if counts[key]
         ]
         body += (
             '<div class="chips" role="navigation" aria-label="記憶分類">'
             + "".join(
-                f'<a href="{ui.with_query("/app/library", c=key) if key else "/app/library"}"'
-                f"{' class=on aria-current=page' if key == category else ''}>"
+                f'<a href="{escape(view.url(c=key, p=1))}"'
+                f"{' class=on aria-current=page' if key == view.c else ''}>"
                 f"{label}<span>{n}</span></a>"
                 for key, label, n in chips
             )
             + "</div>"
         )
-        if category:
-            body += ui.section(
-                CATEGORY_LABELS[category],
-                [
-                    ui.memory_row(m.name, m.description, m.type)
-                    for m in everything
-                    if m.category == category
-                ],
-                grid=True,
-            )
-            return page(CATEGORY_LABELS[category], "library", body)
-        body += (
-            '<div class="list add"><a class="row" href="/app/review">'
-            '<div class="title">整理記憶 ›</div>'
-            '<div class="meta">重複、過時、沒連到總覽的記憶，和 AI 最近記下的動態</div></a></div>'
-        )
-        docs = await documents.list_all()
-        body += ui.section(
-            "文件",
-            [
-                f'<a class="row" href="/app/docs/{escape(d.name)}"><div class="title">'
-                f'{escape(d.title)}</div><div class="meta">'
-                f"{escape(d.project) + '・' if d.project else ''}"
-                f"{d.chars} 字・{d.updated_at:%Y-%m-%d} 更新</div></a>"
-                for d in docs
-            ],
-            empty="還沒有文件。",
-            grid=True,
-        )
-        body += ui.section(
-            "所有記憶・最近更新在前",
-            [ui.memory_row(m.name, m.description, m.type) for m in everything],
-            grid=True,
-        )
-        return page("資料", "library", body)
+        body += _table(view, rows, ctx)
+        body += _pager(view, p, pages, len(shown))
+        title = f"搜尋 {view.q}" if view.q else CATEGORY_LABELS.get(view.c, "資料")
+        return page(title, "library", body)
 
     async def me_page(request: Request) -> Response:
         if (denied := await ctx.guard(request)) is not None:

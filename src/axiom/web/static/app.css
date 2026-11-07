@@ -331,7 +331,7 @@ a.row:hover {
   margin-left: auto;
 }
 
-a.btn {
+a.btn, span.btn {
   display: inline-flex;
   align-items: center;
   min-height: 36px;
@@ -831,6 +831,141 @@ input[type=date] {
 .search input {
   flex: 1;
   min-width: 0;
+}
+
+.filters {
+  flex-wrap: wrap;
+}
+
+.filters input[type=search] {
+  flex: 1 1 240px;
+}
+
+.filters a.btn {
+  min-height: 40px;
+}
+
+table.lib {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+
+.lib th {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.lib th a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.lib th a:hover, .lib th[aria-sort] a {
+  color: var(--fg);
+}
+
+.lib .arrow {
+  margin-left: 4px;
+}
+
+.lib td {
+  padding: 12px 16px;
+  vertical-align: top;
+}
+
+.lib tbody tr {
+  position: relative;
+  transition: background-color .15s;
+}
+
+.lib tbody tr+tr {
+  border-top: 1px solid var(--line);
+}
+
+.lib tbody tr:hover {
+  background: var(--selected);
+}
+
+.lib td.name a {
+  font-weight: 600;
+  color: inherit;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+/* The name link covers the whole row, so any cell opens it. */
+.lib td.name a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.lib .meta.clamp {
+  -webkit-line-clamp: 1;
+}
+
+.lib .kind, .lib .cat, .lib .when {
+  white-space: nowrap;
+  width: 1%;
+}
+
+.lib .cat, .lib .when {
+  font-size: 14px;
+  color: var(--dim);
+}
+
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 24px;
+}
+
+.pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+span.btn.on {
+  background: var(--selected);
+  border-color: var(--fg);
+  font-weight: 600;
+}
+
+span.btn.off {
+  color: var(--input);
+}
+
+.pages .gap {
+  color: var(--dim);
+  padding: 0 2px;
+}
+
+@media (max-width: 640px) {
+  .lib .cat {
+    display: none;
+  }
+  .lib th, .lib td {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .lib .meta.clamp {
+    -webkit-line-clamp: 2;
+  }
+  .filters select {
+    flex: 1 1 0;
+    min-width: 0;
+  }
 }
 
 .empty {

@@ -280,7 +280,14 @@ async def test_library_project_and_doc_pages(
     areas = await client.get("/app/library", params={"c": "areas"}, headers=BEARER)
     assert "acme-overview" in areas.text and "Acme spec" not in areas.text
     found = await client.get("/app/library", params={"q": "Acme"}, headers=BEARER)
-    assert "acme-overview" in found.text
+    assert "acme-overview" in found.text and "Acme spec" in found.text
+    docs = await client.get("/app/library", params={"t": "doc"}, headers=BEARER)
+    assert "Acme spec" in docs.text and "acme-overview" not in docs.text
+    by_name = await client.get("/app/library", params={"s": "name"}, headers=BEARER)
+    assert by_name.text.index("Acme spec") < by_name.text.index("acme-overview")
+    assert 'href="/app/library?s=name&amp;d=desc"' in by_name.text
+    one = await client.get("/app/library", params={"n": "25", "p": "9"}, headers=BEARER)
+    assert "共 2 筆" in one.text and one.text.count("<tr>") == 3
     doc = await client.get("/app/docs/acme-spec", headers=BEARER)
     assert "Long text" in doc.text
 
