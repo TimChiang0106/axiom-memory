@@ -258,6 +258,7 @@ async def test_library_project_and_doc_pages(
     store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
     await store.remember(
         name="acme-overview",
+        title="Acme 總覽",
         description="Acme project overview",
         type="project",
         content="Status. See doc:acme-spec",
@@ -283,8 +284,9 @@ async def test_library_project_and_doc_pages(
     assert "acme-overview" in found.text and "Acme spec" in found.text
     docs = await client.get("/app/library", params={"t": "doc"}, headers=BEARER)
     assert "Acme spec" in docs.text and "acme-overview" not in docs.text
+    assert "Acme 總覽" in library.text
     by_name = await client.get("/app/library", params={"s": "name"}, headers=BEARER)
-    assert by_name.text.index("Acme project overview") < by_name.text.index("Acme spec")
+    assert by_name.text.index("Acme spec") < by_name.text.index("Acme 總覽")
     assert 'href="/app/library?s=name&amp;d=desc"' in by_name.text
     one = await client.get("/app/library", params={"n": "25", "p": "9"}, headers=BEARER)
     assert "共 2 筆" in one.text and one.text.count("<tr>") == 3

@@ -355,12 +355,12 @@ def inline_md(text: str) -> str:
     return re.sub(r"\bdoc:([\w.-]+)", r'<a href="/app/docs/\1">doc:\1</a>', html)
 
 
-def memory_row(name: str, description: str, kind: str = "") -> str:
+def memory_row(name: str, description: str, kind: str = "", title: str = "") -> str:
     label = TYPE_LABELS.get(kind, kind)
     tag = f'<div class="meta"><span class="tag">{label}</span></div>' if kind else ""
     return (
         f'<a class="row" href="/app/memory/{escape(name)}"><div class="title">'
-        f'{escape(name)}</div><div class="meta clamp">{escape(description)}</div>{tag}</a>'
+        f'{escape(title or name)}</div><div class="meta clamp">{escape(description)}</div>{tag}</a>'
     )
 
 

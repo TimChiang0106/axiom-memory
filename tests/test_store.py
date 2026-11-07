@@ -38,6 +38,27 @@ async def test_remember_same_name_updates(store: MemoryStore):
     assert result.memory.source_app == "other-app"
 
 
+async def test_title_survives_an_update_without_one(store: MemoryStore):
+    await store.remember(
+        name="current-shell",
+        title="目前用的 shell",
+        description="Shell Tim uses",
+        content="Uses zsh.",
+        type="state",
+        source_app="test",
+    )
+    result = await store.remember(
+        name="current-shell",
+        description="Shell Tim uses",
+        content="Uses fish.",
+        type="state",
+        source_app="test",
+    )
+    assert result.memory is not None and result.memory.title == "目前用的 shell"
+    [summary] = await store.list_all()
+    assert summary.title == "目前用的 shell" and summary.label == "目前用的 shell"
+
+
 async def test_remember_flags_near_duplicate(store: MemoryStore):
     await store.remember(
         name="prefers-uv-over-pip",

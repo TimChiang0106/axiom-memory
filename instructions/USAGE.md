@@ -30,7 +30,8 @@ I use "axiom" (MCP) as my long-term memory, shared across all my AI apps.
   Pass `category` (`people`, `areas`, `you`, `topics`) to filter when the domain is clear.
 - When I state a durable fact, preference, or decision — or ask you to
   remember something — call `remember`. Distill it into one curated statement;
-  never store conversation logs. Use absolute dates.
+  never store conversation logs. Use absolute dates. Give it a short `title`
+  in my language — that is what I read it by — beside the slug `name`.
   Assign `category`: `you` (profile, tastes, habits), `people` (colleagues, clients,
   relationships), `areas` (projects, products, client accounts), or `topics`
   (skills, guidelines, domain knowledge). If omitted it is inferred from type.
@@ -99,7 +100,7 @@ I use "axiom" (MCP) as my long-term memory, shared across all my AI apps.
 - 有份量的對話開始時，先 get 名為 user-profile 的記憶（我是誰、怎麼思考、我自己辨識出的模式、怎麼跟我合作），整段對話都記著。你自己推論出的性格特質另存一筆 provenance=inferred，經我確認才併入；薪資、健康、財務等敏感細節不放進 user-profile。
 
 - 回答涉及我的偏好、專案、人脈、過往決定的問題前，先用幾個關鍵字呼叫 recall（可選帶 category 篩選：people/areas/you/topics）。開始一項任務前也用任務描述 recall；回傳的 procedural 記憶是必須遵循的操作指令，不是背景知識。
-- 我陳述持久的事實、偏好、決定，或要你記住某事時，呼叫 remember：提煉成一句精煉陳述，絕不存對話記錄，日期寫絕對日期。分類 category 填：you（個人習慣/偏好）、people（同事/客戶/合作對象）、areas（專案/產品/長期業務）、topics（專業知識/工作法/規則）。有份量的討論結束時，若產出持久結論，也要 remember。
+- 我陳述持久的事實、偏好、決定，或要你記住某事時，呼叫 remember：提煉成一句精煉陳述，絕不存對話記錄，日期寫絕對日期，並給一個中文短標題 title。分類 category 填：you（個人習慣/偏好）、people（同事/客戶/合作對象）、areas（專案/產品/長期業務）、topics（專業知識/工作法/規則）。有份量的討論結束時，若產出持久結論，也要 remember。
 - 每個進行中的專案有一筆總覽記憶 <專案>-overview（type=project、category=areas）：是什麼、目前狀態（附日期）、仍有效的決定、已放棄的做法，1400 字內，不放待辦（我提到要做的事或期限就 task add，說了哪天就填 planned_date；長文放 document），related 列出重要細節記憶，description 中英雙語，以「<專案名稱> project overview / 專案總覽」開頭（工作頁用這個名稱顯示專案）。問專案進度時先 get 總覽；對某專案有份量的討論結束後，同名更新總覽，沒有就建立。
 - 一份工作或一個客戶案也比照專案：建總覽；只在該情境有效的記憶（範本、規定格式、命名規則）名稱加總覽前綴、並由總覽 related 連到。帶得走的手藝（我一般怎麼拆工作）放 topics、不加前綴。情境結束時 forget 該總覽，逐一處理回傳的 left_behind：綁在該情境的 forget，仍有價值的改存為不帶前綴的記憶。
 - 微弱的環境訊號（問過的食譜、研究過的主題、準備過的會議）用一行短句 log_event。放心多用，它不會污染 recall，重複模式之後會升級成正式記憶。

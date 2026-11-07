@@ -45,10 +45,9 @@ class _Item:
 
 
 def _memory_item(m: Memory | MemorySummary) -> _Item:
-    """A memory has no title of its own: its description reads as one, and
-    the slug goes underneath for when the AI or a link names it."""
-    title = m.description or m.name
-    return _Item(f"/app/memory/{m.name}", title, m.name, m.type, m.category, m.updated_at)
+    """Read by its title — or, on a memory older than titles, its
+    description — with the slug underneath for when the AI names it."""
+    return _Item(f"/app/memory/{m.name}", m.label, m.name, m.type, m.category, m.updated_at)
 
 
 def _doc_item(d: DocumentSummary) -> _Item:
@@ -153,7 +152,7 @@ def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
         )
 
     if not rows:
-        return '<div class="list"><div class="empty">沒有符合的資料。</div></div>'
+        return '<div class="list lib-wrap"><div class="empty">沒有符合的資料。</div></div>'
     body = "".join(
         f'<tr><td class="name"><a class="clamp" href="{escape(i.href)}">{escape(i.name)}</a>'
         f'<div class="meta">{escape(i.sub)}</div></td>'
@@ -164,7 +163,7 @@ def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
         for i in rows
     )
     return (
-        '<div class="list"><table class="lib"><thead><tr>'
+        '<div class="list lib-wrap"><table class="lib"><thead><tr>'
         + head("name", "名稱", "name")
         + head("kind", "種類", "kind")
         + '<th class="cat">分類</th>'
@@ -294,7 +293,8 @@ def routes(ctx: WebContext) -> list[Route]:
             body += f'<div class="cards two">{cards}</div>'
         groups: dict[str, list[str]] = {}
         for m in mine:
-            groups.setdefault(m.type, []).append(ui.memory_row(m.name, m.description))
+            row = ui.memory_row(m.name, m.description, title=m.title)
+            groups.setdefault(m.type, []).append(row)
         body += (
             '<div class="cards">'
             + "".join(
@@ -444,11 +444,12 @@ def routes(ctx: WebContext) -> list[Route]:
         )
         said = "你說的" if memory.provenance == "stated" else "AI 推測的"
         body = (
-            f"{back}<h1>{escape(memory.name)}</h1>"
+            f"{back}<h1>{escape(memory.title or memory.name)}</h1>"
             f'<div class="meta">{escape(memory.description)}</div>'
             f'<div class="tags"><span class="tag">{TYPE_LABELS[memory.type]}</span>'
             f'<span class="tag">{CATEGORY_LABELS[memory.category]}</span>'
-            f"<span>{said}・{ui.app(memory.source_app)} 最後寫入</span></div>"
+            f"<span>{escape(memory.name) + '・' if memory.title else ''}"
+            f"{said}・{ui.app(memory.source_app)} 最後寫入</span></div>"
         )
         body += await ctx.notices(request, await ctx.get_tasks())
         if memory.possibly_stale:
@@ -465,7 +466,10 @@ def routes(ctx: WebContext) -> list[Route]:
         )
         side += ui.section(
             "被這些記憶連結",
-            [ui.memory_row(m.name, m.description) for m in await memories.backlinks(memory.name)],
+            [
+                ui.memory_row(m.name, m.description, title=m.title)
+                for m in await memories.backlinks(memory.name)
+            ],
         )
         versions = await memories.history(memory.name)
         side += ui.section(
@@ -485,7 +489,7 @@ def routes(ctx: WebContext) -> list[Route]:
             f"{ui.forget(memory.name, back='/app/library')}</div></div></div>"
         )
         body += ui.split(main, side)
-        return page(memory.name, "library", body)
+        return page(memory.title or memory.name, "library", body)
 
     async def document_page(request: Request) -> Response:
         if (denied := await ctx.guard(request)) is not None:

@@ -17,6 +17,7 @@ def render_memory(memory: Memory) -> str:
     return (
         "---\n"
         f"name: {memory.name}\n"
+        f"title: {json.dumps(memory.title, ensure_ascii=False)}\n"
         f"description: {json.dumps(memory.description, ensure_ascii=False)}\n"
         f"type: {memory.type}\n"
         f"category: {memory.category}\n"

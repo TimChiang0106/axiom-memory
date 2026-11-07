@@ -51,7 +51,7 @@ _HEADLESS_SQL = """
           AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.name = v.name)
         ORDER BY v.name, v.superseded_at DESC, v.id DESC
     )
-    SELECT DISTINCT m.name, m.description, m.type, m.category, m.updated_at
+    SELECT DISTINCT m.name, m.title, m.description, m.type, m.category, m.updated_at
     FROM memories m
     JOIN gone g ON m.name LIKE g.prefix || '-%' OR m.name = ANY(g.related)
     WHERE NOT EXISTS (
@@ -67,7 +67,7 @@ _SEARCH_TEXT = "m.name || ' ' || m.description || ' ' || m.content"
 _COLUMNS = (
     "m.name, m.description, m.content, m.type, m.source_app, "
     "m.created_at, m.updated_at, m.use_count, m.last_used_at, m.related, m.category, "
-    "m.provenance"
+    "m.provenance, m.title"
 )
 
 
@@ -154,6 +154,7 @@ class MemoryStore:
         description: str,
         content: str,
         type: MemoryType,
+        title: str = "",
         category: Category | None = None,
         source_app: str,
         related: list[str] | None = None,
@@ -163,7 +164,7 @@ class MemoryStore:
         """Create or update one memory. provenance=None keeps an existing
         memory's provenance on update (so a routine edit never silently
         upgrades an inference to a stated fact) and means 'stated' on
-        create."""
+        create. An empty title likewise keeps the one already there."""
         related = related or []
         if category is None:
             if type == "preference":
@@ -179,7 +180,8 @@ class MemoryStore:
                 UPDATE memories m
                 SET description = $2, content = $3, type = $4, category = $5, source_app = $6,
                     related = $7, embedding = $8::vector,
-                    provenance = COALESCE($9, m.provenance), updated_at = now()
+                    provenance = COALESCE($9, m.provenance),
+                    title = COALESCE(NULLIF($10, ''), m.title), updated_at = now()
                 WHERE m.name = $1
                 RETURNING {_COLUMNS}
                 """,
@@ -192,6 +194,7 @@ class MemoryStore:
                 related,
                 embedding,
                 provenance,
+                title,
             )
             if updated is not None:
                 return RememberResult(status="updated", memory=Memory.from_row(updated))
@@ -216,8 +219,8 @@ class MemoryStore:
                 f"""
                 INSERT INTO memories AS m
                     (name, description, content, type, category, source_app, related,
-                     embedding, provenance)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9)
+                     embedding, provenance, title)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10)
                 RETURNING {_COLUMNS}
                 """,
                 name,
@@ -229,6 +232,7 @@ class MemoryStore:
                 related,
                 embedding,
                 provenance or "stated",
+                title,
             )
             assert created is not None
             return RememberResult(
@@ -411,13 +415,13 @@ class MemoryStore:
     async def list_all(self, *, category: Category | None = None) -> list[MemorySummary]:
         if category is not None:
             rows = await self._pool.fetch(
-                "SELECT name, description, type, category, updated_at FROM memories "
+                "SELECT name, title, description, type, category, updated_at FROM memories "
                 "WHERE category = $1 ORDER BY updated_at DESC",
                 category,
             )
         else:
             rows = await self._pool.fetch(
-                "SELECT name, description, type, category, updated_at FROM memories "
+                "SELECT name, title, description, type, category, updated_at FROM memories "
                 "ORDER BY updated_at DESC"
             )
         return [MemorySummary(**dict(r)) for r in rows]
@@ -425,7 +429,7 @@ class MemoryStore:
     async def backlinks(self, name: str) -> list[MemorySummary]:
         """Memories whose `related` points at `name`."""
         rows = await self._pool.fetch(
-            "SELECT name, description, type, category, updated_at FROM memories "
+            "SELECT name, title, description, type, category, updated_at FROM memories "
             "WHERE $1 = ANY(related) ORDER BY updated_at DESC",
             name,
         )
@@ -500,7 +504,7 @@ class MemoryStore:
             category_filter = f"WHERE m.category = ${len(params)}"
         rows = await self._pool.fetch(
             f"""
-            SELECT m.name, m.description, m.type, m.category, m.updated_at
+            SELECT m.name, m.title, m.description, m.type, m.category, m.updated_at
             FROM memories m
             {category_filter}
             ORDER BY word_similarity($1, {_SEARCH_TEXT}) DESC, m.updated_at DESC
@@ -517,7 +521,7 @@ class MemoryStore:
             return []
         rows = await self._pool.fetch(
             """
-            SELECT name, description, type, category, updated_at
+            SELECT name, title, description, type, category, updated_at
             FROM memories
             WHERE name = ANY($1::text[])
             ORDER BY array_position($1::text[], name)
@@ -753,7 +757,7 @@ class MemoryStore:
                 FROM memories
                 WHERE name LIKE '%' || $1
             )
-            SELECT DISTINCT m.name, m.description, m.type, m.category, m.updated_at
+            SELECT DISTINCT m.name, m.title, m.description, m.type, m.category, m.updated_at
             FROM memories m
             JOIN overviews o ON m.name LIKE o.prefix || '-%'
             WHERE m.name NOT LIKE '%' || $1
@@ -798,7 +802,7 @@ class MemoryStore:
             )"""
         rows = await conn.fetch(
             f"""
-            SELECT m.name, m.description, m.type, m.category, m.updated_at
+            SELECT m.name, m.title, m.description, m.type, m.category, m.updated_at
             FROM memories m
             WHERE m.name <> $3 AND ({sim})::float8 >= $4
             ORDER BY ({sim})::float8 DESC, m.updated_at DESC
@@ -813,6 +817,7 @@ class MemoryStore:
         return [
             MemorySummary(
                 name=r["name"],
+                title=r["title"],
                 description=r["description"],
                 type=r["type"],
                 category=r["category"],

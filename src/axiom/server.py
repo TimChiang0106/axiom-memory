@@ -10,6 +10,7 @@ from datetime import date
 from typing import Annotated, Literal
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_request
 from pydantic import Field
 
@@ -145,7 +146,8 @@ mcp = FastMCP(
         "areas, topics). Call `recall` before answering anything that could depend on "
         "their preferences, ongoing projects, contacts, or past decisions. Call `remember` "
         "when the user states a durable fact, preference, or decision — store one "
-        "curated fact per memory, never conversation logs. Call `log_event` for "
+        "curated fact per memory, never conversation logs, and give it a short "
+        "`title` in the user's language beside its slug `name`. Call `log_event` for "
         "weak ambient signals (what they asked about or did) that aren't worth a "
         "curated memory yet. Each ongoing project keeps one `<project>-overview` "
         "memory (status with a date, decisions in force, abandoned approaches, open "
@@ -203,6 +205,16 @@ async def remember(
             )
         ),
     ],
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "Short title a person reads it by, in the user's language, e.g. "
+                "'偏好用 uv 而不是 pip'. Required when creating a memory; omit on "
+                "update to keep the current one."
+            )
+        ),
+    ] = "",
     category: Annotated[
         Category | None,
         Field(
@@ -262,8 +274,11 @@ async def remember(
     name instead of leaving two records that disagree.
     """
     store = await get_store()
+    if not title.strip() and await store.get(name) is None:
+        raise ToolError("A new memory needs a `title`: a few words in the user's language.")
     return await store.remember(
         name=name,
+        title=title.strip(),
         description=description,
         content=content,
         type=type,

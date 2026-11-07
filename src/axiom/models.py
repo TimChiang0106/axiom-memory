@@ -18,6 +18,8 @@ NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{1,63}$"
 
 class Memory(BaseModel):
     name: str = Field(pattern=NAME_PATTERN)
+    # What a person reads it by; empty on memories written before titles.
+    title: str = ""
     description: str
     content: str
     type: MemoryType
@@ -42,6 +44,10 @@ class Memory(BaseModel):
     # re-remember it to refresh.
     possibly_stale: bool = False
 
+    @property
+    def label(self) -> str:
+        return self.title or self.description or self.name
+
     def payload(self, max_chars: int | None = None) -> dict:
         """The memory as returned to MCP clients. With max_chars, long
         content is cut and flagged truncated, so a few long memories in one
@@ -56,6 +62,7 @@ class Memory(BaseModel):
     def from_row(cls, row: asyncpg.Record) -> "Memory":
         return cls(
             name=row["name"],
+            title=row.get("title") or "",
             description=row["description"],
             content=row["content"],
             type=row["type"],
@@ -76,10 +83,15 @@ class MemorySummary(BaseModel):
     """Index entry: everything needed to decide relevance without the body."""
 
     name: str
+    title: str = ""
     description: str
     type: MemoryType
     category: Category
     updated_at: datetime
+
+    @property
+    def label(self) -> str:
+        return self.title or self.description or self.name
 
 
 class RememberResult(BaseModel):
