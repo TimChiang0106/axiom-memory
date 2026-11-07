@@ -128,6 +128,30 @@ async def test_recall_matches_keywords(store: MemoryStore):
     assert results and results[0].name == "axiom-project"
 
 
+async def test_recall_skips_archived_unless_asked(store: MemoryStore):
+    await store.remember(
+        name="deploy-target-old",
+        description="Old Cloud Run hosting, replaced in October",
+        content="The memory server is deployed on Cloud Run.",
+        type="fact",
+        source_app="test",
+        archived=True,
+    )
+    await store.remember(
+        name="deploy-target",
+        description="Home box hosting via docker compose",
+        content="The memory server is deployed on the home box.",
+        type="fact",
+        source_app="test",
+    )
+    assert [m.name for m in await store.recall("memory server deployed")] == ["deploy-target"]
+    both = await store.recall("memory server deployed", include_archived=True)
+    assert {m.name for m in both} == {"deploy-target", "deploy-target-old"}
+    assert [m.archived for m in both if m.name == "deploy-target-old"] == [True]
+    nearest = await store.index_nearest("memory server deployed")
+    assert [m.name for m in nearest] == ["deploy-target"]
+
+
 async def test_recall_tracks_usage(store: MemoryStore):
     await store.remember(
         name="axiom-project",
@@ -212,9 +236,7 @@ async def test_recall_strengthens_frequently_used(pool):
     # recalled many times before must outrank the never-used one (ACT-R
     # base-level activation). It is off by default; this checks the opt-in.
     await pool.execute("TRUNCATE memories, events, memory_versions")
-    store = MemoryStore(
-        pool, dedup_threshold=0.35, recall_threshold=0.1, use_count_dampening=4.0
-    )
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1, use_count_dampening=4.0)
     for name in ("stack-used", "stack-fresh"):
         await store.remember(
             name=name,

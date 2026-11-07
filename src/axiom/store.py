@@ -260,6 +260,7 @@ class MemoryStore:
         category: Category | None = None,
         limit: int = 5,
         track_usage: bool = True,
+        include_archived: bool = False,
     ) -> list[Memory]:
         """Match on the strongest of full-text match, trigram word similarity
         (covers CJK and fuzzy matches), and — when an embedder is configured —
@@ -280,7 +281,10 @@ class MemoryStore:
         come back flagged possibly_stale so callers verify before relying on
         them. An embedding-API failure silently degrades to lexical-only
         ranking; recall never breaks. track_usage=False skips the usage
-        bump, so offline evaluation leaves the usage signal untouched."""
+        bump, so offline evaluation leaves the usage signal untouched.
+        Archived memories are history, not what holds now: they are left out
+        unless include_archived=True, so a superseded fact never outranks the
+        one that replaced it (and surfacing never refreshes its recency)."""
         query_vec: str | None = None
         if self._embedder is not None:
             values = await self._embedder.embed(query, kind="query")
@@ -320,6 +324,8 @@ class MemoryStore:
             category_filter = f"AND sub.category = ${len(params)}"
         else:
             category_filter = ""
+        if not include_archived:
+            category_filter += " AND NOT sub.archived"
 
         rows = await self._pool.fetch(
             f"""
@@ -517,17 +523,26 @@ class MemoryStore:
         return [MemoryVersion(**{**dict(r), "related": list(r["related"])}) for r in rows]
 
     async def index_nearest(
-        self, query: str, *, category: Category | None = None, limit: int = 25
+        self,
+        query: str,
+        *,
+        category: Category | None = None,
+        limit: int = 25,
+        include_archived: bool = False,
     ) -> list[MemorySummary]:
         """The closest index entries to a query, with no relevance cutoff —
         the fallback shown when recall misses. Bounded, unlike the full index,
         so a miss costs the caller a fixed amount of context however large the
-        store grows."""
+        store grows. Archived entries are left out as recall leaves them out,
+        so the fallback never points at something a re-query cannot find."""
         params: list = [query, limit]
-        category_filter = ""
+        conditions = []
         if category is not None:
             params.append(category)
-            category_filter = f"WHERE m.category = ${len(params)}"
+            conditions.append(f"m.category = ${len(params)}")
+        if not include_archived:
+            conditions.append("NOT m.archived")
+        category_filter = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = await self._pool.fetch(
             f"""
             SELECT m.name, m.title, m.description, m.type, m.category,
@@ -867,7 +882,9 @@ class MemoryStore:
         embedding screen (embedding given) catches paraphrases and
         cross-language restatements (a Chinese memory duplicating an English
         one shares no trigrams at all). Either signal alone is enough to
-        flag."""
+        flag. Archived memories never flag: a new memory resembling one is
+        its replacement, and steering the write onto the archived name would
+        leave the current fact archived and hidden from recall."""
         rows = await conn.fetch(
             f"""
             SELECT {_COLUMNS},
@@ -878,9 +895,10 @@ class MemoryStore:
                        END
                    )::float8 AS score
             FROM memories m
-            WHERE similarity({_SEARCH_TEXT}, $1) >= $2
-               OR ($3::text IS NOT NULL AND m.embedding IS NOT NULL
-                   AND 1 - (m.embedding <=> ($3::text)::vector) >= $4)
+            WHERE NOT m.archived
+              AND (similarity({_SEARCH_TEXT}, $1) >= $2
+                   OR ($3::text IS NOT NULL AND m.embedding IS NOT NULL
+                       AND 1 - (m.embedding <=> ($3::text)::vector) >= $4))
             ORDER BY score DESC
             LIMIT 3
             """,

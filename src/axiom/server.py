@@ -222,8 +222,8 @@ async def remember(
             description=(
                 "True for a memory kept only as history — superseded, closed or no "
                 "longer in force — instead of marking it as history in its title. The "
-                "user's library hides it by default. Omit on update to keep the "
-                "current value."
+                "user's library hides it by default and recall skips it. Omit on "
+                "update to keep the current value."
             )
         ),
     ] = None,
@@ -337,6 +337,16 @@ async def recall(
         ),
     ] = None,
     limit: Annotated[int, Field(ge=1, le=20)] = 5,
+    include_archived: Annotated[
+        bool,
+        Field(
+            description=(
+                "True to also search archived memories (history: superseded or no "
+                "longer in force), e.g. when asked what was decided before. Off by "
+                "default so old versions never answer for current ones."
+            )
+        ),
+    ] = False,
 ) -> dict:
     """Search the user's long-term memory.
 
@@ -358,10 +368,14 @@ async def recall(
     nothing is known.
     """
     store = await get_store()
-    memories = await store.recall(query, category=category, limit=limit)
+    memories = await store.recall(
+        query, category=category, limit=limit, include_archived=include_archived
+    )
     max_chars = get_settings().recall_content_chars
     if not memories:
-        nearest = await store.index_nearest(query, category=category)
+        nearest = await store.index_nearest(
+            query, category=category, include_archived=include_archived
+        )
         return {
             "matches": [],
             "note": (
