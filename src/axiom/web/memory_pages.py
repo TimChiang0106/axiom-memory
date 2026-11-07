@@ -174,7 +174,9 @@ class _LibraryView:
             ranked = sorted(items, key=lambda i: projects.get(i.project, i.project), reverse=desc)
             return sorted(ranked, key=lambda i: not i.project)
         if self.sort == "active":
-            return sorted(items, key=lambda i: i.recency or 0, reverse=desc)
+            # Documents have no usage, so they go last whichever way it runs.
+            ranked = sorted(items, key=lambda i: i.recency or 0, reverse=desc)
+            return sorted(ranked, key=lambda i: i.recency is None)
         if self.sort == "created":
             return sorted(items, key=lambda i: i.created_at or i.updated_at, reverse=desc)
         if self.sort == "updated":
