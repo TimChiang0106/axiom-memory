@@ -566,3 +566,26 @@ async def test_projects_page_shows_priorities_when_kept(
     )
     page = (await client.get("/app/projects", headers=BEARER)).text
     assert "優先順序" in page and "<li>P1 Ship the pilot</li>" in page
+
+
+async def test_projects_page_lists_projects_as_a_table(
+    client: httpx.AsyncClient, tasks: TaskStore, pool: asyncpg.Pool
+):
+    store = MemoryStore(pool, dedup_threshold=0.35, recall_threshold=0.1)
+    for p in ("acme", "beta"):
+        await store.remember(
+            name=f"{p}-overview",
+            description=f"{p} project overview",
+            content="Status.",
+            type="project",
+            source_app="test",
+            allow_duplicate=True,
+        )
+    for n in range(6):
+        await tasks.add(title=f"Step {n}", project="acme")
+    await tasks.add(title="Other", project="beta")
+    page = (await client.get("/app/projects", headers=BEARER)).text
+    assert '<table class="data projects">' in page
+    assert '<a href="/app/projects/acme">acme</a>' in page
+    assert 'class="num warn" title="超過 5 筆' in page and ">6</td>" in page
+    assert page.index("/app/projects/acme") < page.index("/app/projects/beta")

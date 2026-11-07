@@ -152,7 +152,7 @@ def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
         )
 
     if not rows:
-        return '<div class="list lib-wrap"><div class="empty">沒有符合的資料。</div></div>'
+        return '<div class="list table-wrap"><div class="empty">沒有符合的資料。</div></div>'
     body = "".join(
         f'<tr><td class="name"><a class="clamp" href="{escape(i.href)}">{escape(i.name)}</a>'
         f'<div class="meta">{escape(i.sub)}</div></td>'
@@ -163,7 +163,7 @@ def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
         for i in rows
     )
     return (
-        '<div class="list lib-wrap"><table class="lib"><thead><tr>'
+        '<div class="list table-wrap"><table class="data"><thead><tr>'
         + head("name", "名稱", "name")
         + head("kind", "種類", "kind")
         + '<th class="cat">分類</th>'

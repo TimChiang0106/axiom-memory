@@ -133,42 +133,47 @@ def routes(ctx: WebContext) -> list[Route]:
         orphans = await memories.orphans()
         labels = await tasks.project_names()
 
-        def card(project: str | None, overview: Memory | None) -> str:
+        def details(summary: str, links: list[str]) -> str:
+            return (
+                f'<details class="ov"><summary class="flag">{summary}</summary>'
+                f'<div class="meta">{"、".join(links)}</div></details>'
+            )
+
+        def row(project: str | None, overview: Memory | None) -> str:
             s = stats.get(project)
             name = labels.get(project or "", project or "未分專案")
-            due = (
-                f'<div class="meta">最近截止 {ui.day(s.next_due, today)}</div>'
-                if s and s.next_due
-                else ""
-            )
-            flags = ""
-            if s and s.open > OPEN_WARN:
-                flags += (
-                    f'<div class="flag">未完成 {s.open} 筆，超過 {OPEN_WARN} 筆，該收斂了</div>'
-                )
+            flags = []
             if overview and overview.name in drifted:
-                newer = "、".join(drifted[overview.name].newer_related)
-                flags += f'<div class="flag">總覽落後於：{escape(newer)}</div>'
+                newer = drifted[overview.name].newer_related
+                flags.append(details(f"總覽落後 {len(newer)} 筆", [ui.mem_link(n) for n in newer]))
             mine = [o for o in orphans if project and o.name.startswith(f"{project}-")]
             if mine:
-                names = "、".join(
-                    f'<a href="/app/memory/{escape(o.name)}">{escape(o.name)}</a>' for o in mine
-                )
-                flags += (
-                    '<details class="ov">'
-                    f'<summary class="flag">{len(mine)} 筆記憶沒連到總覽</summary>'
-                    f'<div class="meta">{names}</div></details>'
+                flags.append(
+                    details(f"{len(mine)} 筆記憶沒連到總覽", [ui.mem_link(o.name) for o in mine])
                 )
             if s and s.stale_open:
-                for t in s.stale_open:
-                    flags += (
-                        f'<div class="flag">「{escape(t.title)}」{tasks.stale_open_days} '
-                        "天沒動，還要做嗎？</div>"
-                    )
+                back = "/app/projects"
+                links = [
+                    f'<a href="{escape(ui.task_url(t, back))}">{escape(t.title)}</a>'
+                    for t in s.stale_open
+                ]
+                flags.append(
+                    details(f"{len(links)} 件 {tasks.stale_open_days} 天沒動，還要做嗎？", links)
+                )
+            many = (
+                f' class="num warn" title="超過 {OPEN_WARN} 筆，該收斂了"'
+                if s and s.open > OPEN_WARN
+                else ' class="num"'
+            )
+            due = ui.day(s.next_due, today) if s and s.next_due else "—"
             return (
-                f'<div class="list"><div class="row"><div class="title">'
-                f'<a href="{ui.project_url(project)}">{escape(name)} ›</a></div>'
-                f"{ui.progress(s)}{due}{ui.metrics(s)}{flags}</div></div>"
+                f'<tr><td class="name"><a href="{ui.project_url(project)}">{escape(name)}</a>'
+                f"{ui.progress(s)}</td>"
+                f"<td{many}>{s.open if s else 0}</td>"
+                f'<td class="num wide">{s.done_this_week if s else 0}</td>'
+                f'<td class="num wide">{s.done_total if s else 0}</td>'
+                f'<td class="when wide">{due}</td>'
+                f'<td class="flags">{"".join(flags)}</td></tr>'
             )
 
         known = {o.name.removesuffix("-overview") for o in overviews}
@@ -179,8 +184,8 @@ def routes(ctx: WebContext) -> list[Route]:
                 -(stats[p].open if (p := o.name.removesuffix("-overview")) in stats else 0)
             ),
         )
-        cards = [card(o.name.removesuffix("-overview"), o) for o in ordered]
-        cards += [card(p, None) for p in stats if p not in known]
+        rows = [row(o.name.removesuffix("-overview"), o) for o in ordered]
+        rows += [row(p, None) for p in stats if p not in known]
         priorities = await memories.get(PRIORITIES)
         order = (
             ui.section(
@@ -194,10 +199,15 @@ def routes(ctx: WebContext) -> list[Route]:
             if priorities
             else ""
         )
+        table = (
+            '<div class="list table-wrap"><table class="data projects"><thead><tr>'
+            '<th class="name">專案</th><th class="num">未完成</th>'
+            '<th class="num wide">本週完成</th><th class="num wide">總完成</th>'
+            '<th class="when wide">最近截止</th><th class="flags">需要注意</th>'
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+        )
         body = f"<h1>專案</h1>{order}" + (
-            f'<div class="cards boxes">{"".join(cards)}</div>'
-            if cards
-            else '<div class="list"><div class="empty">沒有專案。</div></div>'
+            table if rows else '<div class="list"><div class="empty">沒有專案。</div></div>'
         )
         return page("專案", "projects", body)
 

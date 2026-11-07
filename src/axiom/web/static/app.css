@@ -492,13 +492,6 @@ a.btn:hover {
   .cards.two {
     grid-template-columns: repeat(2,minmax(0,1fr));
   }
-  .cards.boxes {
-    gap: 12px 24px;
-    margin-top: 16px;
-  }
-  .cards.boxes>.list {
-    margin: 0;
-  }
   .list.grid {
     display: grid;
     grid-template-columns: repeat(auto-fill,minmax(300px,1fr));
@@ -837,7 +830,7 @@ input[type=date] {
   flex-wrap: wrap;
 }
 
-.lib-wrap {
+.table-wrap {
   margin-top: 16px;
 }
 
@@ -849,13 +842,13 @@ input[type=date] {
   min-height: 40px;
 }
 
-table.lib {
+table.data {
   width: 100%;
   border-collapse: collapse;
   font-size: 15px;
 }
 
-.lib th {
+.data th {
   padding: 10px 16px;
   font-size: 13px;
   font-weight: 600;
@@ -865,38 +858,38 @@ table.lib {
   border-bottom: 1px solid var(--line);
 }
 
-.lib th a {
+.data th a {
   color: inherit;
   text-decoration: none;
 }
 
-.lib th a:hover, .lib th[aria-sort] a {
+.data th a:hover, .data th[aria-sort] a {
   color: var(--fg);
 }
 
-.lib .arrow {
+.data .arrow {
   margin-left: 4px;
 }
 
-.lib td {
+.data td {
   padding: 12px 16px;
   vertical-align: top;
 }
 
-.lib tbody tr {
+.data tbody tr {
   position: relative;
   transition: background-color .15s;
 }
 
-.lib tbody tr+tr {
+.data tbody tr+tr {
   border-top: 1px solid var(--line);
 }
 
-.lib tbody tr:hover {
+.data tbody tr:hover {
   background: var(--selected);
 }
 
-.lib td.name a {
+.data td.name a {
   font-weight: 600;
   color: inherit;
   text-decoration: none;
@@ -904,25 +897,66 @@ table.lib {
 }
 
 /* The name link covers the whole row, so any cell opens it. */
-.lib td.name a::after {
+.data td.name a::after {
   content: "";
   position: absolute;
   inset: 0;
 }
 
-.lib td.name .meta {
+.data td.name .meta {
   font-size: 13px;
   word-break: break-all;
 }
 
-.lib .kind, .lib .cat, .lib .when {
+.data .kind, .data .cat, .data .when {
   white-space: nowrap;
   width: 1%;
 }
 
-.lib .cat, .lib .when {
+.data .cat, .data .when {
   font-size: 14px;
   color: var(--dim);
+}
+
+.data .num {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.data td.num {
+  font-weight: 600;
+}
+
+.data td.num.warn {
+  color: var(--warn);
+}
+
+.data td.flags {
+  font-size: 14px;
+}
+
+/* Links and folds in the 需要注意 cell sit above the row-wide link. */
+.data td.flags > * {
+  position: relative;
+  z-index: 1;
+}
+
+.data td.flags details.ov {
+  margin: 0;
+}
+
+.data td.flags details.ov + details.ov {
+  margin-top: 4px;
+}
+
+.data td.flags summary {
+  color: var(--warn);
+}
+
+.data td.flags .meta {
+  word-break: break-word;
 }
 
 .pager {
@@ -957,14 +991,14 @@ span.btn.off {
 }
 
 @media (max-width: 640px) {
-  .lib .cat {
+  .data .cat, .data .wide {
     display: none;
   }
-  .lib th, .lib td {
+  .data th, .data td {
     padding-left: 12px;
     padding-right: 12px;
   }
-  .lib td.name a.clamp {
+  .data td.name a.clamp {
     -webkit-line-clamp: 3;
   }
   .filters select {
