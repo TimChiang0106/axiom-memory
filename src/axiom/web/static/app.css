@@ -906,8 +906,9 @@ table.lib {
   inset: 0;
 }
 
-.lib .meta.clamp {
-  -webkit-line-clamp: 1;
+.lib td.name .meta {
+  font-size: 13px;
+  word-break: break-all;
 }
 
 .lib .kind, .lib .cat, .lib .when {
@@ -959,8 +960,8 @@ span.btn.off {
     padding-left: 12px;
     padding-right: 12px;
   }
-  .lib .meta.clamp {
-    -webkit-line-clamp: 2;
+  .lib td.name a.clamp {
+    -webkit-line-clamp: 3;
   }
   .filters select {
     flex: 1 1 0;

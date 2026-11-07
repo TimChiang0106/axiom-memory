@@ -45,7 +45,10 @@ class _Item:
 
 
 def _memory_item(m: Memory | MemorySummary) -> _Item:
-    return _Item(f"/app/memory/{m.name}", m.name, m.description, m.type, m.category, m.updated_at)
+    """A memory has no title of its own: its description reads as one, and
+    the slug goes underneath for when the AI or a link names it."""
+    title = m.description or m.name
+    return _Item(f"/app/memory/{m.name}", title, m.name, m.type, m.category, m.updated_at)
 
 
 def _doc_item(d: DocumentSummary) -> _Item:
@@ -152,8 +155,8 @@ def _table(view: _LibraryView, rows: list[_Item], ctx: WebContext) -> str:
     if not rows:
         return '<div class="list"><div class="empty">沒有符合的資料。</div></div>'
     body = "".join(
-        f'<tr><td class="name"><a href="{escape(i.href)}">{escape(i.name)}</a>'
-        f'<div class="meta clamp">{escape(i.sub)}</div></td>'
+        f'<tr><td class="name"><a class="clamp" href="{escape(i.href)}">{escape(i.name)}</a>'
+        f'<div class="meta">{escape(i.sub)}</div></td>'
         f'<td class="kind"><span class="tag">{_KIND_LABELS[i.kind]}</span></td>'
         f'<td class="cat">{CATEGORY_LABELS.get(i.category, "—")}</td>'
         f'<td class="when"><time title="{ctx.local(i.updated_at)}">'
