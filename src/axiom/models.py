@@ -93,6 +93,11 @@ class MemorySummary(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime
     archived: bool = False
+    # Filled by list_all: how often and how lately recall surfaced it, and
+    # the 0..1 factor recall's score decays by for that.
+    use_count: int = 0
+    last_used_at: datetime | None = None
+    recency: float | None = None
 
     @property
     def label(self) -> str:

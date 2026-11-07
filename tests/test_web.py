@@ -300,6 +300,7 @@ async def test_library_project_and_doc_pages(
     )
     current = (await client.get("/app/library", headers=BEARER)).text
     assert "Acme 舊計畫" not in current and "建立時間" in current
+    assert "活躍度" in current and '半衰期 180 天">100%' in current
     assert 'href="/app/library?pj=acme">Acme</a>' in current
     history = await client.get("/app/library", params={"h": "only"}, headers=BEARER)
     assert "Acme 舊計畫" in history.text and "Acme 總覽" not in history.text

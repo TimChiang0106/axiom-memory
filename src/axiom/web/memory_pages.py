@@ -31,7 +31,14 @@ _KIND_ORDER = {k: n for n, k in enumerate(_KIND_LABELS)}
 _PAGE_SIZES = (25, 50, 100)
 _SEARCH_LIMIT = 100
 # Each sortable column and the direction its first click sorts in.
-_SORTS = {"name": "asc", "project": "asc", "kind": "asc", "created": "desc", "updated": "desc"}
+_SORTS = {
+    "name": "asc",
+    "project": "asc",
+    "kind": "asc",
+    "active": "desc",
+    "created": "desc",
+    "updated": "desc",
+}
 # Which memories the 狀態 filter shows: in force (the default), all, or
 # only those kept as history.
 _STATES = {"": "現行", "all": "含歷史", "only": "只看歷史"}
@@ -48,9 +55,14 @@ class _Item:
     created_at: datetime | None
     updated_at: datetime
     archived: bool = False
+    # Usage, for memories: times surfaced, when last, and recall's decay.
+    use_count: int = 0
+    last_used_at: datetime | None = None
+    recency: float | None = None
+    half_life: float = 0
 
 
-def _memory_item(m: Memory | MemorySummary, project: str) -> _Item:
+def _memory_item(m: MemorySummary, project: str, half_life: float) -> _Item:
     """Read by its title — or, on a memory older than titles, its
     description — with the slug underneath for when the AI names it."""
     return _Item(
@@ -63,6 +75,10 @@ def _memory_item(m: Memory | MemorySummary, project: str) -> _Item:
         m.created_at,
         m.updated_at,
         m.archived,
+        m.use_count,
+        m.last_used_at,
+        m.recency,
+        half_life,
     )
 
 
@@ -157,6 +173,8 @@ class _LibraryView:
             # Rows without a project go last whichever way it runs.
             ranked = sorted(items, key=lambda i: projects.get(i.project, i.project), reverse=desc)
             return sorted(ranked, key=lambda i: not i.project)
+        if self.sort == "active":
+            return sorted(items, key=lambda i: i.recency or 0, reverse=desc)
         if self.sort == "created":
             return sorted(items, key=lambda i: i.created_at or i.updated_at, reverse=desc)
         if self.sort == "updated":
@@ -241,6 +259,20 @@ def _table(view: _LibraryView, rows: list[_Item], projects: dict[str, str], ctx:
             f"{escape(name)}</a></td>"
         )
 
+    def active(i: _Item) -> str:
+        if i.recency is None:
+            return '<td class="num wide">—</td>'
+        since = (
+            f"最後被用到 {ctx.local(i.last_used_at)}"
+            if i.last_used_at
+            else "還沒被用過，從建立算起"
+        )
+        hint = f"{since}・用過 {i.use_count} 次・半衰期 {i.half_life:g} 天"
+        return (
+            f'<td class="num wide" title="{hint}">{round(i.recency * 100)}%'
+            f'<div class="meta">{i.use_count} 次</div></td>'
+        )
+
     body = "".join(
         f'<tr><td class="name"><a class="clamp" href="{escape(i.href)}">{escape(i.name)}</a>'
         f'<div class="meta">{"<span class=tag>歷史</span>" if i.archived else ""}'
@@ -248,7 +280,7 @@ def _table(view: _LibraryView, rows: list[_Item], projects: dict[str, str], ctx:
         f"{project(i)}"
         f'<td class="kind"><span class="tag">{_KIND_LABELS[i.kind]}</span></td>'
         f'<td class="cat">{CATEGORY_LABELS.get(i.category, "—")}</td>'
-        f"{when(i.created_at, 'when wide')}{when(i.updated_at, 'when')}</tr>"
+        f"{active(i)}{when(i.created_at, 'when wide')}{when(i.updated_at, 'when')}</tr>"
         for i in rows
     )
     return (
@@ -257,6 +289,7 @@ def _table(view: _LibraryView, rows: list[_Item], projects: dict[str, str], ctx:
         + head("project", "專案", "cat wide")
         + head("kind", "種類", "kind")
         + '<th class="cat">分類</th>'
+        + head("active", "活躍度", "num wide")
         + head("created", "建立時間", "when wide")
         + head("updated", "更新時間", "when")
         + f"</tr></thead><tbody>{body}</tbody></table></div>"
@@ -312,6 +345,11 @@ def routes(ctx: WebContext) -> list[Route]:
         if view.pj not in projects:
             view.pj = ""
         project_of = _project_finder(await memories.overviews(), projects)
+        index = {m.name: m for m in await memories.list_all()}
+
+        def item(m: MemorySummary) -> _Item:
+            return _memory_item(m, project_of(m.name), memories.half_life_days(m.type))
+
         if view.q:
             found = await memories.recall(view.q, limit=_SEARCH_LIMIT, track_usage=False)
             needle = view.q.casefold()
@@ -320,11 +358,11 @@ def routes(ctx: WebContext) -> list[Route]:
                 for d in await documents.list_all()
                 if needle in f"{d.name} {d.title} {d.project or ''}".casefold()
             ]
-            found_memories = [_memory_item(m, project_of(m.name)) for m in found]
+            found_memories = [item(index[m.name]) for m in found if m.name in index]
             items = [_doc_item(d) for d in docs] + found_memories
         else:
             items = [_doc_item(d) for d in await documents.list_all()] + [
-                _memory_item(m, project_of(m.name)) for m in await memories.list_all()
+                item(m) for m in index.values()
             ]
 
         typed = [i for i in items if view.shows(i)]

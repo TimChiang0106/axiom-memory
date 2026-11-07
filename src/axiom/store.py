@@ -418,20 +418,38 @@ class MemoryStore:
         return [MemorySummary(**dict(r)) for r in rows]
 
     async def list_all(self, *, category: Category | None = None) -> list[MemorySummary]:
-        if category is not None:
-            rows = await self._pool.fetch(
-                "SELECT name, title, description, type, category, created_at, updated_at, archived "
-                "FROM memories "
-                "WHERE category = $1 ORDER BY updated_at DESC",
-                category,
-            )
-        else:
-            rows = await self._pool.fetch(
-                "SELECT name, title, description, type, category, created_at, updated_at, archived "
-                "FROM memories "
-                "ORDER BY updated_at DESC"
-            )
+        """The whole index, newest first, with each memory's usage and the
+        recency factor recall decays its score by — the same half-lives, so
+        the library shows which memories are sinking out of reach."""
+        rows = await self._pool.fetch(
+            """
+            SELECT name, title, description, type, category, created_at, updated_at,
+                   archived, use_count, last_used_at,
+                   exp(
+                       -ln(2)
+                       * (extract(epoch FROM now() - COALESCE(last_used_at, created_at))
+                          / 86400.0)
+                       / (CASE type WHEN 'state' THEN $2::float8
+                                    WHEN 'procedural' THEN $4::float8
+                                    ELSE $3::float8 END)
+                   )::float8 AS recency
+            FROM memories
+            WHERE $1::text IS NULL OR category = $1
+            ORDER BY updated_at DESC
+            """,
+            category,
+            self._state_half_life_days,
+            self._recall_half_life_days,
+            self._procedural_half_life_days,
+        )
         return [MemorySummary(**dict(r)) for r in rows]
+
+    def half_life_days(self, kind: MemoryType) -> float:
+        if kind == "state":
+            return self._state_half_life_days
+        if kind == "procedural":
+            return self._procedural_half_life_days
+        return self._recall_half_life_days
 
     async def backlinks(self, name: str) -> list[MemorySummary]:
         """Memories whose `related` points at `name`."""
